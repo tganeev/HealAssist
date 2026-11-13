@@ -36,7 +36,9 @@ class CalendarViewModel(app: Application) : AndroidViewModel(app) {
 
     fun selectDate(date: LocalDate) {
         _selectedDate.value = date
-        viewModelScope.launch(Dispatchers.IO) { loadForDate(date) }
+        viewModelScope.launch(Dispatchers.IO) {
+            loadForDate(date)
+        }
     }
 
     private suspend fun loadForDate(date: LocalDate) {

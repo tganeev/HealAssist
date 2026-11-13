@@ -41,7 +41,7 @@ class SessionActivity : AppCompatActivity() {
     private var cameraProvider: ProcessCameraProvider? = null
     private val cameraExecutor: ExecutorService = Executors.newSingleThreadExecutor()
 
-    // ТЕСТОВОЕ УПРАЖНЕНИЕ (Пальцы/Кулак)
+    // ТЕСТОВОЕ УПРАЖНЕНИЕ
     private val currentExercise = ExerciseModel(
         id = "ex_kulak",
         name = "Сжимание кулака",
@@ -60,8 +60,9 @@ class SessionActivity : AppCompatActivity() {
 
     private val requestPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            if (granted) startCamera()
-            else {
+            if (granted) {
+                startCamera()
+            } else {
                 Toast.makeText(this, "Нет доступа к камере", Toast.LENGTH_SHORT).show()
                 finish()
             }
@@ -93,40 +94,55 @@ class SessionActivity : AppCompatActivity() {
     }
 
     private fun startCamera() {
-        // Выбираем легкую модель для пальцев
-        helper = PoseLandmarkerHelper(
-            context = this,
-            modelFile = "pose_landmarker_light.task",
-            onResult = { r, w, h -> runOnUiThread { processResult(r, w, h) } },
-            onError = { msg -> runOnUiThread { statusText.text = msg } },
-        )
+        // Задержка на отрисовку layout, чтобы избежать IllegalStateException
+        viewFinder.post {
+            try {
+                helper = PoseLandmarkerHelper(
+                    context = this,
+                    modelFile = "pose_landmarker_light.task",
+                    onResult = { r, w, h -> runOnUiThread { processResult(r, w, h) } },
+                    onError = { msg -> runOnUiThread { statusText.text = msg } },
+                )
 
-        val future = ProcessCameraProvider.getInstance(this)
-        future.addListener({
-            cameraProvider = future.get()
-            bindCamera()
-        }, ContextCompat.getMainExecutor(this))
+                val future = ProcessCameraProvider.getInstance(this)
+                future.addListener({
+                    cameraProvider = future.get()
+                    bindCamera()
+                }, ContextCompat.getMainExecutor(this))
+            } catch (e: Exception) {
+                Toast.makeText(this, "Ошибка инициализации: ${e.message}", Toast.LENGTH_LONG).show()
+                finish()
+            }
+        }
     }
 
     private fun bindCamera() {
         val provider = cameraProvider ?: return
+
         val preview = Preview.Builder().build().also {
             it.setSurfaceProvider(viewFinder.surfaceProvider)
         }
+
         val analysis = ImageAnalysis.Builder()
             .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .build()
         analysis.setAnalyzer(cameraExecutor, ::analyzeFrame)
 
-        val selector = CameraSelector.Builder().requireLensFacing(CameraSelector.LENS_FACING_FRONT).build()
-        overlay.mirrored = true
+        // Безопасный выбор камеры
+        val selector = if (provider.hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA)) {
+            CameraSelector.DEFAULT_FRONT_CAMERA
+        } else {
+            CameraSelector.DEFAULT_BACK_CAMERA
+        }
+
+        overlay.mirrored = (selector == CameraSelector.DEFAULT_FRONT_CAMERA)
 
         try {
             provider.unbindAll()
             provider.bindToLifecycle(this, selector, preview, analysis)
         } catch (e: Exception) {
-            Toast.makeText(this, "Ошибка камеры", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Ошибка камеры: ${e.message}", Toast.LENGTH_LONG).show()
         }
     }
 
