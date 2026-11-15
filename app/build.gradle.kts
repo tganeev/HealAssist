@@ -7,12 +7,12 @@ plugins {
 
 android {
     namespace = "com.healassist.app"
-    compileSdk = 36
+    compileSdk = 35 // или 36, если у вас установлен
 
     defaultConfig {
         applicationId = "com.healassist.app"
         minSdk = 26
-        targetSdk = 36
+        targetSdk = 35
         versionCode = 1
         versionName = "1.0"
     }
@@ -32,14 +32,15 @@ android {
     buildFeatures {
         compose = true
     }
-    // ВАЖНО для MediaPipe!
+
+    // 👇 ВОТ ЗДЕСЬ ДОЛЖЕН БЫТЬ БЛОК noCompress (внутри android, но снаружи dependencies)
     androidResources {
         noCompress += "task"
     }
 }
 
 dependencies {
-    // Базовые Compose зависимости из toml
+    // Compose
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.activity.compose)
@@ -48,11 +49,12 @@ dependencies {
     implementation(libs.androidx.compose.ui.graphics)
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.material3)
+    implementation(libs.androidx.lifecycle.viewmodel.compose)
+    implementation(libs.androidx.compose.material.icons.extended)
 
     debugImplementation(libs.androidx.compose.ui.tooling)
-    debugImplementation(libs.androidx.compose.ui.test.manifest)
 
-    // Для экранов на View (Камера, Логин)
+    // View (Камера, Логин)
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("com.google.android.material:material:1.12.0")
     implementation("androidx.constraintlayout:constraintlayout:2.2.1")
@@ -63,22 +65,19 @@ dependencies {
     implementation("androidx.room:room-ktx:$room")
     ksp("androidx.room:room-compiler:$room")
 
-    // CameraX (Камера)
+    // CameraX
     val camerax = "1.4.0"
     implementation("androidx.camera:camera-core:$camerax")
     implementation("androidx.camera:camera-camera2:$camerax")
     implementation("androidx.camera:camera-lifecycle:$camerax")
     implementation("androidx.camera:camera-view:$camerax")
 
-    // MediaPipe (Распознавание)
+    // MediaPipe
     implementation("com.google.mediapipe:tasks-vision:0.10.18")
 
-    // USB Serial (Arduino)
+    // USB Serial (для Arduino)
     implementation("com.github.mik3y:usb-serial-for-android:3.8.1")
 
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
-
-    implementation(libs.androidx.lifecycle.viewmodel.compose)
-    implementation(libs.androidx.compose.material.icons.extended)
 }

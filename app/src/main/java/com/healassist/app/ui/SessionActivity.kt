@@ -17,10 +17,11 @@ import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.google.mediapipe.framework.image.BitmapImageBuilder
-import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarkerResult
-import com.healassist.app.camera.HandRepCounters
+import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult
+import com.healassist.app.camera.GestureAnalyzer
+import com.healassist.app.camera.HandGesture
+import com.healassist.app.camera.HandLandmarkerHelper
 import com.healassist.app.camera.OverlayView
-import com.healassist.app.camera.PoseLandmarkerHelper
 import com.healassist.app.data.ExerciseModel
 import com.healassist.app.data.ExerciseType
 import kotlinx.coroutines.delay
@@ -37,11 +38,10 @@ class SessionActivity : AppCompatActivity() {
     private lateinit var statusText: TextView
     private lateinit var pauseButton: Button
 
-    private var helper: PoseLandmarkerHelper? = null
+    private var helper: HandLandmarkerHelper? = null
     private var cameraProvider: ProcessCameraProvider? = null
     private val cameraExecutor: ExecutorService = Executors.newSingleThreadExecutor()
 
-    // ТЕСТОВОЕ УПРАЖНЕНИЕ
     private val currentExercise = ExerciseModel(
         id = "ex_kulak",
         name = "Сжимание кулака",
@@ -52,20 +52,17 @@ class SessionActivity : AppCompatActivity() {
         type = ExerciseType.FINGER
     )
 
-    private var handState = HandRepCounters.HandState()
+    private var lastGesture = HandGesture.NONE
     private var currentSet = 1
     private var repsInSet = 0
     private var isPaused = false
     private var lastTimestampMs = 0L
+    private var isDestroyed = false
 
     private val requestPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            if (granted) {
-                startCamera()
-            } else {
-                Toast.makeText(this, "Нет доступа к камере", Toast.LENGTH_SHORT).show()
-                finish()
-            }
+            if (granted) startCamera()
+            else finish()
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -94,14 +91,13 @@ class SessionActivity : AppCompatActivity() {
     }
 
     private fun startCamera() {
-        // Задержка на отрисовку layout, чтобы избежать IllegalStateException
         viewFinder.post {
             try {
-                helper = PoseLandmarkerHelper(
+                helper = HandLandmarkerHelper(
                     context = this,
-                    modelFile = "pose_landmarker_light.task",
+                    modelFile = "hand_landmarker.task",
                     onResult = { r, w, h -> runOnUiThread { processResult(r, w, h) } },
-                    onError = { msg -> runOnUiThread { statusText.text = msg } },
+                    onError = { msg -> runOnUiThread { statusText.text = "Ошибка: $msg" } },
                 )
 
                 val future = ProcessCameraProvider.getInstance(this)
@@ -129,7 +125,6 @@ class SessionActivity : AppCompatActivity() {
             .build()
         analysis.setAnalyzer(cameraExecutor, ::analyzeFrame)
 
-        // Безопасный выбор камеры
         val selector = if (provider.hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA)) {
             CameraSelector.DEFAULT_FRONT_CAMERA
         } else {
@@ -147,6 +142,7 @@ class SessionActivity : AppCompatActivity() {
     }
 
     private fun analyzeFrame(proxy: ImageProxy) {
+        if (isDestroyed) { proxy.close(); return }
         val h = helper ?: run { proxy.close(); return }
         val rotation = proxy.imageInfo.rotationDegrees
         val bitmap = try { proxy.toBitmap() } catch (e: Exception) { proxy.close(); return }
@@ -164,16 +160,29 @@ class SessionActivity : AppCompatActivity() {
         return Bitmap.createBitmap(src, 0, 0, src.width, src.height, m, false)
     }
 
-    private fun processResult(result: PoseLandmarkerResult, imageWidth: Int, imageHeight: Int) {
-        val lm = result.landmarks().firstOrNull() ?: return
-        overlay.setFrame(lm, imageWidth, imageHeight)
+    private fun processResult(result: HandLandmarkerResult, imageWidth: Int, imageHeight: Int) {
+        // Руки нет в кадре
+        if (result.landmarks().isEmpty()) {
+            statusText.text = "Статус: Рука не найдена"
+            lastGesture = HandGesture.NONE
+            return
+        }
+
+        val gesture = GestureAnalyzer.analyze(result)
+
+        // Обновляем статус на экране
+        val statusMessage = when (gesture) {
+            HandGesture.NONE -> "Рука не найдена"
+            HandGesture.OPEN_PALM -> "Ладонь открыта"
+            HandGesture.FIST -> "Кулак сжат"
+            HandGesture.UNKNOWN -> "Промежуточное положение"
+        }
+        statusText.text = "Статус: $statusMessage"
 
         if (isPaused) return
 
-        val prev = handState.count
-        handState = HandRepCounters.updateFistCount(lm, handState, imageWidth, imageHeight)
-
-        if (handState.count > prev) {
+        // Логика засчитывания повторения: кулак был сжат -> разжался
+        if (lastGesture == HandGesture.FIST && gesture == HandGesture.OPEN_PALM) {
             repsInSet++
             updateUi()
 
@@ -185,7 +194,8 @@ class SessionActivity : AppCompatActivity() {
                 }
             }
         }
-        statusText.text = "Состояние: ${handState.state}"
+
+        lastGesture = gesture
     }
 
     private fun startRest() {
@@ -196,7 +206,7 @@ class SessionActivity : AppCompatActivity() {
             isPaused = false
             currentSet++
             repsInSet = 0
-            handState = HandRepCounters.HandState()
+            lastGesture = HandGesture.NONE
             updateUi()
         }
     }
@@ -213,6 +223,7 @@ class SessionActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        isDestroyed = true
         super.onDestroy()
         cameraExecutor.shutdown()
         helper?.close()

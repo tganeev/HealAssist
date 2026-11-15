@@ -1,45 +1,59 @@
 package com.healassist.app.camera
 
-import com.google.mediapipe.tasks.components.containers.NormalizedLandmark
-import kotlin.math.hypot
+import android.content.Context
+import com.google.mediapipe.framework.image.BitmapImageBuilder
+import com.google.mediapipe.framework.image.MPImage
+import com.google.mediapipe.tasks.core.BaseOptions
+import com.google.mediapipe.tasks.core.Delegate
+import com.google.mediapipe.tasks.vision.core.RunningMode
+import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarker
+import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult
 
-object HandRepCounters {
-    private val FINGER_TIPS = listOf(16, 18, 20, 22)
-    private const val WRIST_INDEX = 0
-    private const val CLOSED_THRESHOLD = 0.12
-    private const val OPEN_THRESHOLD = 0.18
+class HandLandmarkerHelper(
+    context: Context,
+    modelFile: String = "hand_landmarker.task",
+    private val onResult: (HandLandmarkerResult, imageWidth: Int, imageHeight: Int) -> Unit,
+    private val onError: (String) -> Unit,
+) : AutoCloseable {
 
-    data class HandState(val state: String = STATE_OPEN, val count: Int = 0)
+    private var handLandmarker: HandLandmarker? = null
 
-    const val STATE_OPEN = "open"
-    const val STATE_CLOSED = "closed"
-
-    fun updateFistCount(
-        landmarks: List<NormalizedLandmark>,
-        currentState: HandState,
-        imageWidth: Int,
-        imageHeight: Int
-    ): HandState {
-        if (landmarks.size < 23) return currentState
-        val wrist = landmarks[WRIST_INDEX]
-        var totalDist = 0.0
-        for (tipIndex in FINGER_TIPS) {
-            val tip = landmarks[tipIndex]
-            val dx = (tip.x() - wrist.x()).toDouble() * imageWidth
-            val dy = (tip.y() - wrist.y()).toDouble() * imageHeight
-            totalDist += hypot(dx, dy)
+    init {
+        handLandmarker = create(context, Delegate.GPU, modelFile)
+            ?: create(context, Delegate.CPU, modelFile)
+        if (handLandmarker == null) {
+            onError("не удалось создать HandLandmarker ($modelFile)")
         }
-        val avgDist = totalDist / FINGER_TIPS.size
-        val normalizedDist = avgDist / imageHeight
+    }
 
-        return when {
-            currentState.state == STATE_OPEN && normalizedDist < CLOSED_THRESHOLD -> {
-                HandState(STATE_CLOSED, currentState.count)
-            }
-            currentState.state == STATE_CLOSED && normalizedDist > OPEN_THRESHOLD -> {
-                HandState(STATE_OPEN, currentState.count + 1)
-            }
-            else -> currentState
+    private fun create(context: Context, delegate: Delegate, modelFile: String): HandLandmarker? =
+        try {
+            val baseOptions = BaseOptions.builder()
+                .setModelAssetPath(modelFile)
+                .setDelegate(delegate)
+                .build()
+            val options = HandLandmarker.HandLandmarkerOptions.builder()
+                .setBaseOptions(baseOptions)
+                .setRunningMode(RunningMode.LIVE_STREAM)
+                .setNumHands(1)
+                .setMinHandDetectionConfidence(0.5f)
+                .setMinTrackingConfidence(0.5f)
+                .setResultListener { result, image ->
+                    onResult(result, image.width, image.height)
+                }
+                .setErrorListener { e -> onError(e.message ?: "ошибка инференса") }
+                .build()
+            HandLandmarker.createFromOptions(context, options)
+        } catch (e: Exception) {
+            null
         }
+
+    fun detectAsync(image: MPImage, timestampMs: Long) {
+        handLandmarker?.detectAsync(image, timestampMs)
+    }
+
+    override fun close() {
+        handLandmarker?.close()
+        handLandmarker = null
     }
 }
