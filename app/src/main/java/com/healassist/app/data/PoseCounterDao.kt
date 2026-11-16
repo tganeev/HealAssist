@@ -39,6 +39,9 @@ interface ScheduledExerciseDao {
     """)
     suspend fun getForDate(date: Long): List<ScheduledExerciseEntity>
 
+    @Query("UPDATE scheduled_exercise SET status = :status, sessionId = :sessionId, updatedAt = :now WHERE id = :id")
+    suspend fun markStatus(id: String, status: String, sessionId: String?, now: Long = System.currentTimeMillis())
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(item: ScheduledExerciseEntity)
 }

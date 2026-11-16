@@ -20,24 +20,31 @@ object RehabSeed {
         val exerciseId = UUID.randomUUID().toString()
         val exercises = listOf(
             ProgramExerciseEntity(
-                id = exerciseId,
+                id = "ex1", // <-- Жесткий ID
                 programId = programId,
                 exerciseType = "FINGER",
-                targetAngle = null,
-                targetReps = 5, // Для теста 5 раз
+                targetReps = 5,
                 targetSets = 2,
                 restSeconds = 10,
-                orderIndex = 0,
-                notes = "Кулак"
-            )
+                orderIndex = 0
+            ),
+            ProgramExerciseEntity(
+                id = "ex2", // <-- Жесткий ID
+                programId = programId,
+                exerciseType = "FINGER",
+                targetReps = 5,
+                targetSets = 2,
+                restSeconds = 10,
+                orderIndex = 1
+            ),
         )
         db.programExerciseDao().upsertAll(exercises)
 
         // 👇 ДОБАВЛЯЕМ НАЗНАЧЕНИЕ НА СЕГОДНЯ
-        val todayUtc = LocalDate.now().atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli()
+        val todayUtc = java.time.LocalDate.now().atStartOfDay(java.time.ZoneOffset.UTC).toInstant().toEpochMilli()
         val scheduled = ScheduledExerciseEntity(
-            id = UUID.randomUUID().toString(),
-            exerciseId = exerciseId,
+            id = java.util.UUID.randomUUID().toString(),
+            exerciseId = "ex1", // <-- Назначаем первое
             scheduledDate = todayUtc,
             status = "PLANNED"
         )
@@ -45,7 +52,7 @@ object RehabSeed {
     }
 
     fun phaseName(orderIndex: Int): String = when (orderIndex) {
-        0 -> "Упражнение 1: Кулак"
+        0 -> "Утренний комплекс"
         else -> "Упражнение ${orderIndex + 1}"
     }
 }

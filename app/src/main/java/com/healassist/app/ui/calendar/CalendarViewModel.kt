@@ -29,15 +29,20 @@ class CalendarViewModel(app: Application) : AndroidViewModel(app) {
 
     init {
         viewModelScope.launch(Dispatchers.IO) {
-            RehabSeed.seed(db) // Заполняем БД при старте
+            RehabSeed.seed(db) // Заполняем БД при старте (если пусто)
             loadForDate(LocalDate.now())
         }
     }
 
     fun selectDate(date: LocalDate) {
         _selectedDate.value = date
+        viewModelScope.launch(Dispatchers.IO) { loadForDate(date) }
+    }
+
+    // Метод для обновления данных при возврате из камеры
+    fun refresh() {
         viewModelScope.launch(Dispatchers.IO) {
-            loadForDate(date)
+            loadForDate(_selectedDate.value)
         }
     }
 

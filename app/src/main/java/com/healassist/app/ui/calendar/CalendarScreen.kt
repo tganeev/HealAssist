@@ -6,16 +6,12 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material.icons.filled.ChevronRight
-import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.CheckCircle // Импорт для галочки
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -24,17 +20,21 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.healassist.app.data.RehabSeed
+import com.healassist.app.data.ScheduledStatus
 import com.healassist.app.ui.SessionActivity
-import com.healassist.app.ui.logs.LogsActivity
 import java.time.LocalDate
 import java.time.YearMonth
 import java.time.format.TextStyle
 import java.util.Locale
+
+private val ColorGreen = Color(0xFF4CAF50)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -44,8 +44,20 @@ fun CalendarScreen(vm: CalendarViewModel = viewModel()) {
     val exercises by vm.exercises.collectAsState()
 
     var displayedMonth by remember { mutableStateOf(YearMonth.from(selectedDate)) }
-    var showMonthDialog by remember { mutableStateOf(false) }
-    var showMenu by remember { mutableStateOf(false) }
+
+    // Слушатель возврата на экран (чтобы обновить статус "Выполнено")
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                vm.refresh()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
 
     LaunchedEffect(selectedDate) {
         if (YearMonth.from(selectedDate) != displayedMonth) {
@@ -55,39 +67,17 @@ fun CalendarScreen(vm: CalendarViewModel = viewModel()) {
 
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = { Text("HealAssist") },
-                navigationIcon = {
-                    Box {
-                        IconButton(onClick = { showMenu = true }) {
-                            Icon(Icons.Default.Menu, contentDescription = "Меню")
-                        }
-                        DropdownMenu(
-                            expanded = showMenu,
-                            onDismissRequest = { showMenu = false }
-                        ) {
-                            DropdownMenuItem(
-                                text = { Text("Логирование") },
-                                onClick = {
-                                    showMenu = false
-                                    context.startActivity(Intent(context, LogsActivity::class.java))
-                                }
-                            )
-                        }
-                    }
-                }
-            )
+            TopAppBar(title = { Text("HealAssist") })
         }
     ) { padding ->
         Column(modifier = Modifier.padding(padding).fillMaxSize()) {
 
-            // --- Заголовок с месяцем и стрелками ---
+            // Заголовок с месяцем и стрелками
             Row(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Стрелка Назад (минус 7 дней)
                 IconButton(onClick = {
                     val newDate = selectedDate.minusWeeks(1)
                     displayedMonth = YearMonth.from(newDate)
@@ -96,21 +86,13 @@ fun CalendarScreen(vm: CalendarViewModel = viewModel()) {
                     Icon(Icons.Default.ChevronLeft, contentDescription = "Назад")
                 }
 
-                // Кнопка выбора месяца
-                Row(
-                    modifier = Modifier.clickable { showMonthDialog = true }.padding(8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = displayedMonth.month.getDisplayName(TextStyle.FULL, Locale("ru"))
-                            .replaceFirstChar { it.uppercase() } + " " + displayedMonth.year,
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Icon(Icons.Default.ArrowDropDown, contentDescription = "Выбрать месяц")
-                }
+                Text(
+                    text = displayedMonth.month.getDisplayName(TextStyle.FULL, Locale("ru"))
+                        .replaceFirstChar { it.uppercase() } + " " + displayedMonth.year,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold
+                )
 
-                // Стрелка Вперед (плюс 7 дней)
                 IconButton(onClick = {
                     val newDate = selectedDate.plusWeeks(1)
                     displayedMonth = YearMonth.from(newDate)
@@ -120,7 +102,7 @@ fun CalendarScreen(vm: CalendarViewModel = viewModel()) {
                 }
             }
 
-            // --- Лента дней ---
+            // Лента дней
             DaysStrip(
                 month = displayedMonth,
                 selectedDate = selectedDate,
@@ -129,7 +111,7 @@ fun CalendarScreen(vm: CalendarViewModel = viewModel()) {
 
             HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
 
-            // --- Список заданий ---
+            // Список заданий
             if (exercises.isEmpty()) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text("На этот день упражнений нет.", color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -141,104 +123,53 @@ fun CalendarScreen(vm: CalendarViewModel = viewModel()) {
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     items(exercises) { item ->
-                        Card(modifier = Modifier.fillMaxWidth()) {
+                        val isDone = item.scheduled.status == ScheduledStatus.DONE
+
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (isDone) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.surface
+                            )
+                        ) {
                             Column(modifier = Modifier.padding(16.dp)) {
-                                Text(RehabSeed.phaseName(item.exercise.orderIndex), fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                                Text(
+                                    text = "Утренний комплекс", // <-- ИЗМЕНЕНО НАЗВАНИЕ
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 16.sp
+                                )
                                 Spacer(modifier = Modifier.height(4.dp))
                                 Text("Подходы: ${item.exercise.targetSets} x ${item.exercise.targetReps}")
 
-                                Button(
-                                    onClick = {
-                                        val intent = Intent(context, SessionActivity::class.java)
-                                        context.startActivity(intent)
-                                    },
-                                    modifier = Modifier.padding(top = 8.dp)
-                                ) {
-                                    Text("Начать")
+                                if (isDone) {
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(
+                                            Icons.Default.CheckCircle,
+                                            contentDescription = null,
+                                            tint = ColorGreen,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text(
+                                            text = "Выполнено",
+                                            color = ColorGreen,
+                                            fontWeight = FontWeight.Medium
+                                        )
+                                    }
+                                } else {
+                                    Button(
+                                        onClick = {
+                                            val intent = Intent(context, SessionActivity::class.java).apply {
+                                                putExtra(SessionActivity.EXTRA_EXERCISE_ID, item.exercise.id)
+                                            }
+                                            context.startActivity(intent)
+                                        },
+                                        modifier = Modifier.padding(top = 8.dp)
+                                    ) {
+                                        Text("Начать")
+                                    }
                                 }
                             }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // --- Диалог выбора месяца и года ---
-    if (showMonthDialog) {
-        MonthYearPickerDialog(
-            initialMonth = displayedMonth,
-            onDismiss = { showMonthDialog = false },
-            onDateSelected = { newMonth ->
-                displayedMonth = newMonth
-                vm.selectDate(newMonth.atDay(1))
-                showMonthDialog = false
-            }
-        )
-    }
-}
-
-@Composable
-private fun MonthYearPickerDialog(
-    initialMonth: YearMonth,
-    onDismiss: () -> Unit,
-    onDateSelected: (YearMonth) -> Unit
-) {
-    var currentYear by remember { mutableStateOf(initialMonth.year) }
-    var showYearMenu by remember { mutableStateOf(false) }
-
-    Dialog(onDismissRequest = onDismiss) {
-        Card(modifier = Modifier.padding(16.dp)) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                // Выбор года
-                Box {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().clickable { showYearMenu = true }.padding(vertical = 8.dp),
-                        horizontalArrangement = Arrangement.Center,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("Год: $currentYear", fontWeight = FontWeight.Bold, fontSize = 18.sp)
-                        Icon(Icons.Default.ArrowDropDown, contentDescription = "Выбрать год")
-                    }
-                    DropdownMenu(
-                        expanded = showYearMenu,
-                        onDismissRequest = { showYearMenu = false },
-                        modifier = Modifier.heightIn(max = 200.dp)
-                    ) {
-                        (2020..2035).forEach { year ->
-                            DropdownMenuItem(
-                                text = { Text(year.toString()) },
-                                onClick = { currentYear = year; showYearMenu = false }
-                            )
-                        }
-                    }
-                }
-
-                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-                Text("Выберите месяц", fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 16.dp))
-
-                // Матрица месяцев
-                LazyVerticalGrid(
-                    columns = GridCells.Fixed(3),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.height(250.dp)
-                ) {
-                    val months = listOf("Янв", "Фев", "Мар", "Апр", "Май", "Июн", "Июл", "Авг", "Сен", "Окт", "Ноя", "Дек")
-                    items(12) { index ->
-                        val isCurrent = initialMonth.year == currentYear && initialMonth.monthValue == (index + 1)
-                        val bgColor = if (isCurrent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
-                        val textColor = if (isCurrent) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
-
-                        Box(
-                            modifier = Modifier
-                                .aspectRatio(1f)
-                                .clip(CircleShape)
-                                .background(bgColor)
-                                .clickable { onDateSelected(YearMonth.of(currentYear, index + 1)) },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(months[index], color = textColor, fontSize = 14.sp, fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal)
                         }
                     }
                 }
@@ -262,18 +193,26 @@ private fun DaysStrip(
     ) {
         items(days) { date ->
             val isSelected = date == selectedDate
+
             Column(
-                modifier = Modifier.width(48.dp).clip(CircleShape).clickable { onDateClick(date) }.padding(vertical = 8.dp),
+                modifier = Modifier
+                    .width(48.dp)
+                    .clip(CircleShape)
+                    .clickable { onDateClick(date) }
+                    .padding(vertical = 8.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Text(
-                    text = date.dayOfWeek.getDisplayName(TextStyle.SHORT, Locale("ru")).take(2).replaceFirstChar { it.uppercase() },
+                    text = date.dayOfWeek.getDisplayName(TextStyle.SHORT, Locale("ru")).take(2)
+                        .replaceFirstChar { it.uppercase() },
                     fontSize = 11.sp,
                     color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Box(
-                    modifier = Modifier.size(36.dp).clip(CircleShape)
+                    modifier = Modifier
+                        .size(36.dp)
+                        .clip(CircleShape)
                         .background(if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent),
                     contentAlignment = Alignment.Center
                 ) {

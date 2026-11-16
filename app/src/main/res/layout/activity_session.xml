@@ -13,6 +13,21 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
+    <!-- Таймер отдыха по центру -->
+    <TextView
+        android:id="@+id/restTimerText"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:textColor="@android:color/white"
+        android:textSize="80sp"
+        android:textStyle="bold"
+        android:shadowColor="#000000"
+        android:shadowDx="4"
+        android:shadowDy="4"
+        android:shadowRadius="8"
+        android:visibility="gone" />
+
     <!-- ВЕРХНЯЯ ПАНЕЛЬ: Круги с номерами упражнений -->
     <HorizontalScrollView
         android:layout_width="match_parent"

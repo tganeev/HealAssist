@@ -5,6 +5,12 @@ import androidx.room.ForeignKey
 import androidx.room.Index
 import androidx.room.PrimaryKey
 
+object ScheduledStatus {
+    const val PLANNED = "PLANNED"
+    const val DONE = "DONE"
+    const val SKIPPED = "SKIPPED"
+}
+
 @Entity(
     tableName = "scheduled_exercise",
     foreignKeys = [
