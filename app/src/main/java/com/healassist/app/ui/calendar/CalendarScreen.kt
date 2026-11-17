@@ -28,12 +28,17 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.healassist.app.data.ScheduledStatus
 import com.healassist.app.ui.SessionActivity
+import java.time.DayOfWeek
 import java.time.LocalDate
-import java.time.YearMonth
 import java.time.format.TextStyle
+import java.time.temporal.TemporalAdjusters
 import java.util.Locale
 
 private val ColorGreen = Color(0xFF4CAF50)
+
+/** Понедельник недели, содержащей [date]. */
+private fun weekStartMonday(date: LocalDate): LocalDate =
+    date.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY))
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -42,7 +47,8 @@ fun CalendarScreen(vm: CalendarViewModel = viewModel()) {
     val selectedDate by vm.selectedDate.collectAsState()
     val dailyExercises by vm.dailyExercises.collectAsState()
 
-    var displayedMonth by remember { mutableStateOf(YearMonth.from(selectedDate)) }
+    val weekStart = remember(selectedDate) { weekStartMonday(selectedDate) }
+    val weekDays = remember(weekStart) { (0L..6L).map { weekStart.plusDays(it) } }
 
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
@@ -53,42 +59,32 @@ fun CalendarScreen(vm: CalendarViewModel = viewModel()) {
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    LaunchedEffect(selectedDate) {
-        if (YearMonth.from(selectedDate) != displayedMonth) displayedMonth = YearMonth.from(selectedDate)
-    }
-
     Scaffold(topBar = { TopAppBar(title = { Text("HealAssist") }) }) { padding ->
         Column(modifier = Modifier.padding(padding).fillMaxSize()) {
 
-            // Заголовок с месяцем и стрелками
             Row(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 IconButton(onClick = {
-                    val newDate = selectedDate.minusWeeks(1)
-                    displayedMonth = YearMonth.from(newDate)
-                    vm.selectDate(newDate)
-                }) { Icon(Icons.Default.ChevronLeft, "Назад") }
+                    vm.selectDate(selectedDate.minusWeeks(1))
+                }) { Icon(Icons.Default.ChevronLeft, "Предыдущая неделя") }
 
                 Text(
-                    text = displayedMonth.month.getDisplayName(TextStyle.FULL, Locale("ru"))
-                        .replaceFirstChar { it.uppercase() } + " " + displayedMonth.year,
+                    text = selectedDate.month
+                        .getDisplayName(TextStyle.FULL, Locale("ru"))
+                        .replaceFirstChar { it.uppercase() } + " " + selectedDate.year,
                     fontSize = 18.sp, fontWeight = FontWeight.Bold
                 )
                 IconButton(onClick = {
-                    val newDate = selectedDate.plusWeeks(1)
-                    displayedMonth = YearMonth.from(newDate)
-                    vm.selectDate(newDate)
-                }) { Icon(Icons.Default.ChevronRight, "Вперед") }
+                    vm.selectDate(selectedDate.plusWeeks(1))
+                }) { Icon(Icons.Default.ChevronRight, "Следующая неделя") }
             }
 
-            // Лента дней
-            DaysStrip(month = displayedMonth, selectedDate = selectedDate, onDateClick = { vm.selectDate(it) })
+            DaysStrip(days = weekDays, selectedDate = selectedDate, onDateClick = { vm.selectDate(it) })
             HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
 
-            // Список карточек на день
             if (dailyExercises.isEmpty()) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text("На этот день упражнений нет.", color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -98,24 +94,25 @@ fun CalendarScreen(vm: CalendarViewModel = viewModel()) {
                 val totalCount = dailyExercises.size
                 val isAllDone = doneCount == totalCount
 
-                // Ищем первое невыполненное упражнение для запуска
-                val nextPendingExerciseId = dailyExercises.firstOrNull { it.status == ScheduledStatus.PLANNED }?.exerciseId
-
                 Column(modifier = Modifier.padding(16.dp)) {
-                    // Карточка "Утренний комплекс"
                     Card(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable(enabled = !isAllDone) {
-                                val pendingIds = dailyExercises.filter { it.status == ScheduledStatus.PLANNED }.map { it.exerciseId }
+                                val pendingIds = dailyExercises
+                                    .filter { it.status == ScheduledStatus.PLANNED }
+                                    .map { it.exerciseId }
                                 if (pendingIds.isNotEmpty()) {
-                                    // 1. СРАЗУ ГОВОРИМ ФРАЗУ (пока экран еще не переключился)
-                                    com.healassist.app.TtsManager.speak("Поставъте телефон перед собой таким образом, чтобы в камеру вы видели свои руки.")
+                                    // Фраза "Поставьте телефон..." нужна только если ПЕРВОЕ
+                                    // упражнение (ex1) ещё не выполнено — т.е. присутствует
+                                    // среди запланированных. Если ex1 уже сделан и сессия
+                                    // начинается со 2-го — фразу не произносим.
+                                    val isFirstExercisePending = pendingIds.contains("ex1")
 
-                                    // 2. ЗАПУСКАЕМ АКТИВИТИ
                                     val intent = Intent(context, SessionActivity::class.java).apply {
                                         putExtra(SessionActivity.EXTRA_EXERCISE_ID, pendingIds.first())
                                         putExtra(SessionActivity.EXTRA_PENDING_LIST, ArrayList(pendingIds))
+                                        putExtra(SessionActivity.EXTRA_IS_FIRST, isFirstExercisePending)
                                     }
                                     context.startActivity(intent)
                                 }
@@ -135,8 +132,6 @@ fun CalendarScreen(vm: CalendarViewModel = viewModel()) {
                                     fontSize = 16.sp
                                 )
                                 Spacer(modifier = Modifier.height(4.dp))
-
-                                // Счетчик выполненных упражнений
                                 Text(
                                     text = "Выполнено $doneCount из $totalCount упражнений",
                                     fontSize = 14.sp,
@@ -144,7 +139,6 @@ fun CalendarScreen(vm: CalendarViewModel = viewModel()) {
                                 )
                             }
 
-                            // Иконка в правой части карточки
                             if (isAllDone) {
                                 Icon(
                                     Icons.Default.CheckCircle,
@@ -169,8 +163,11 @@ fun CalendarScreen(vm: CalendarViewModel = viewModel()) {
 }
 
 @Composable
-private fun DaysStrip(month: YearMonth, selectedDate: LocalDate, onDateClick: (LocalDate) -> Unit) {
-    val days = (1..month.lengthOfMonth()).map { month.atDay(it) }
+private fun DaysStrip(
+    days: List<LocalDate>,
+    selectedDate: LocalDate,
+    onDateClick: (LocalDate) -> Unit
+) {
     LazyRow(
         modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
         contentPadding = PaddingValues(horizontal = 16.dp),
@@ -179,24 +176,39 @@ private fun DaysStrip(month: YearMonth, selectedDate: LocalDate, onDateClick: (L
         items(days) { date ->
             val isSelected = date == selectedDate
             Column(
-                modifier = Modifier.width(48.dp).clip(CircleShape).clickable { onDateClick(date) }.padding(vertical = 8.dp),
+                modifier = Modifier
+                    .width(48.dp)
+                    .clip(CircleShape)
+                    .clickable { onDateClick(date) }
+                    .padding(vertical = 8.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Text(
-                    text = date.dayOfWeek.getDisplayName(TextStyle.SHORT, Locale("ru")).take(2).replaceFirstChar { it.uppercase() },
+                    text = date.dayOfWeek
+                        .getDisplayName(TextStyle.SHORT, Locale("ru"))
+                        .take(2)
+                        .replaceFirstChar { it.uppercase() },
                     fontSize = 11.sp,
-                    color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                    color = if (isSelected) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Box(
-                    modifier = Modifier.size(36.dp).clip(CircleShape).background(if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent),
+                    modifier = Modifier
+                        .size(36.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (isSelected) MaterialTheme.colorScheme.primary
+                            else Color.Transparent
+                        ),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
                         text = date.dayOfMonth.toString(),
                         fontSize = 15.sp,
                         fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                        color = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
+                        color = if (isSelected) MaterialTheme.colorScheme.onPrimary
+                        else MaterialTheme.colorScheme.onSurface
                     )
                 }
             }

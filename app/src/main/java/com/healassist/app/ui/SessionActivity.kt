@@ -25,7 +25,7 @@ import com.healassist.app.data.ExerciseModel
 import com.healassist.app.data.ExerciseType
 import com.healassist.app.data.PoseCounterDatabase
 import com.healassist.app.data.ScheduledStatus
-import com.healassist.app.TtsManager // <-- Импортируем наш синглтон
+import com.healassist.app.TtsManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -37,6 +37,13 @@ class SessionActivity : AppCompatActivity() {
     companion object {
         const val EXTRA_EXERCISE_ID = "exercise_id"
         const val EXTRA_PENDING_LIST = "pending_list"
+        const val EXTRA_IS_FIRST = "is_first"
+
+        /** ID упражнения "Веер" — для него используется специальный анализатор. */
+        private const val EXERCISE_FAN_ID = "ex2"
+
+        /** ID первого упражнения — для него произносится инструкция про телефон. */
+        private const val EXERCISE_FIRST_ID = "ex1"
     }
 
     private lateinit var viewFinder: PreviewView
@@ -64,6 +71,9 @@ class SessionActivity : AppCompatActivity() {
 
     private var pendingIds = mutableListOf<String>()
 
+    private var isFirstExerciseInSession = false
+    private var totalInSession = 0
+
     private var lastGesture = HandGesture.NONE
     private var isFistConfirmed = false
     private var currentSet = 1
@@ -90,20 +100,33 @@ class SessionActivity : AppCompatActivity() {
 
         exitButton.text = "Выход"
         exitButton.setOnClickListener {
-            TtsManager.stop() // Останавливаем речь при выходе
+            TtsManager.stop()
             finish()
         }
 
         currentExerciseId = intent.getStringExtra(EXTRA_EXERCISE_ID) ?: "ex1"
         pendingIds = intent.getStringArrayListExtra(EXTRA_PENDING_LIST) ?: mutableListOf(currentExerciseId)
+        totalInSession = pendingIds.size
+        isFirstExerciseInSession = intent.getBooleanExtra(EXTRA_IS_FIRST, false)
 
         updateCircles()
         updateUi()
 
-        // Говорим инструкцию с задержкой, чтобы фраза про телефон успела закончиться
-        lifecycleScope.launch {
-            delay(4500L) // Ждем 4.5 секунды
-            TtsManager.speak("${currentExercise.name}. ${currentExercise.instruction}")
+        // Фраза про телефон — ТОЛЬКО если первое упражнение (ex1) ещё не выполнено
+        // и присутствует в текущей сессии. Флаг EXTRA_IS_FIRST дополнительно
+        // подстраховывает на случай, если активити запустят не из CalendarScreen.
+        val shouldAnnouncePhoneSetup =
+            isFirstExerciseInSession && pendingIds.contains(EXERCISE_FIRST_ID)
+
+        if (shouldAnnouncePhoneSetup) {
+            TtsManager.speak(
+                "Поставьте телефон перед собой таким образом, чтобы в камеру вы видели свои руки.",
+                flushQueue = true
+            )
+            TtsManager.speak(exerciseAnnouncement(), flushQueue = false)
+            isFirstExerciseInSession = false
+        } else {
+            TtsManager.speak(exerciseAnnouncement())
         }
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
@@ -111,6 +134,31 @@ class SessionActivity : AppCompatActivity() {
         } else {
             requestPermission.launch(Manifest.permission.CAMERA)
         }
+    }
+
+    private fun exerciseAnnouncement(): String {
+        val ordinal = sessionOrdinal()
+        return "Упражнение $ordinal. ${currentExercise.name}. ${currentExercise.instruction}"
+    }
+
+    private fun sessionOrdinal(): String {
+        val done = totalInSession - pendingIds.size
+        val number = done + 1
+        return ordinalWord(number)
+    }
+
+    private fun ordinalWord(n: Int): String = when (n) {
+        1 -> "первое"
+        2 -> "второе"
+        3 -> "третье"
+        4 -> "четвёртое"
+        5 -> "пятое"
+        6 -> "шестое"
+        7 -> "седьмое"
+        8 -> "восьмое"
+        9 -> "девятое"
+        10 -> "десятое"
+        else -> "$n-е"
     }
 
     private fun startCamera() {
@@ -144,7 +192,8 @@ class SessionActivity : AppCompatActivity() {
             .build()
         analysis.setAnalyzer(cameraExecutor, ::analyzeFrame)
 
-        val selector = if (provider.hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA)) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
+        val selector = if (provider.hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA))
+            CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
 
         try {
             provider.unbindAll()
@@ -180,15 +229,30 @@ class SessionActivity : AppCompatActivity() {
             return
         }
 
-        val gesture = GestureAnalyzer.analyze(result)
+        val hand = result.landmarks()[0]
+
+        // Для "Веера" используем специальный анализатор (пальцы сведены/разведены),
+        // для остальных упражнений — общий (кулак/ладонь).
+        val gesture = if (currentExerciseId == EXERCISE_FAN_ID) {
+            GestureAnalyzer.analyzeFan(hand)
+        } else {
+            GestureAnalyzer.analyze(hand)
+        }
+
         val statusMessage = when (gesture) {
             HandGesture.NONE -> "Рука не найдена"
-            HandGesture.OPEN_PALM -> "Ладонь открыта"
-            HandGesture.FIST -> "Кулак сжат"
+            HandGesture.OPEN_PALM -> {
+                if (currentExerciseId == EXERCISE_FAN_ID) "Пальцы разведены" else "Ладонь открыта"
+            }
+            HandGesture.FIST -> {
+                if (currentExerciseId == EXERCISE_FAN_ID) "Пальцы сведены" else "Кулак сжат"
+            }
             HandGesture.UNKNOWN -> "Промежуточное положение"
         }
         statusText.text = "Статус: $statusMessage"
 
+        // Счётчик: сведены (FIST) -> разведены (OPEN_PALM) = 1 повтор.
+        // Для "Веера" семантика та же: FIST = "сведены", OPEN_PALM = "разведены".
         if (gesture == HandGesture.FIST) isFistConfirmed = true
 
         if (isFistConfirmed && gesture == HandGesture.OPEN_PALM) {
@@ -262,7 +326,7 @@ class SessionActivity : AppCompatActivity() {
 
                 updateCircles()
                 updateUi()
-                TtsManager.speak("${currentExercise.name}. ${currentExercise.instruction}")
+                TtsManager.speak(exerciseAnnouncement())
             } else {
                 Toast.makeText(this@SessionActivity, "Все упражнения выполнены!", Toast.LENGTH_LONG).show()
                 finish()
@@ -298,6 +362,5 @@ class SessionActivity : AppCompatActivity() {
         super.onDestroy()
         cameraExecutor.shutdown()
         helper?.close()
-        // TtsManager.shutdown() НЕ вызываем здесь, чтобы не убивать глобальный TTS
     }
 }
