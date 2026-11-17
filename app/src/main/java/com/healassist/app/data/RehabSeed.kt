@@ -17,42 +17,28 @@ object RehabSeed {
         )
         db.rehabProgramDao().upsert(program)
 
-        val exerciseId = UUID.randomUUID().toString()
-        val exercises = listOf(
-            ProgramExerciseEntity(
-                id = "ex1", // <-- Жесткий ID
-                programId = programId,
-                exerciseType = "FINGER",
-                targetReps = 5,
-                targetSets = 2,
-                restSeconds = 10,
-                orderIndex = 0
-            ),
-            ProgramExerciseEntity(
-                id = "ex2", // <-- Жесткий ID
-                programId = programId,
-                exerciseType = "FINGER",
-                targetReps = 5,
-                targetSets = 2,
-                restSeconds = 10,
-                orderIndex = 1
-            ),
+        val ex1 = ProgramExerciseEntity(
+            id = "ex1", programId = programId, exerciseType = "FINGER",
+            targetReps = 5, targetSets = 2, restSeconds = 10, orderIndex = 0
         )
-        db.programExerciseDao().upsertAll(exercises)
-
-        // 👇 ДОБАВЛЯЕМ НАЗНАЧЕНИЕ НА СЕГОДНЯ
-        val todayUtc = java.time.LocalDate.now().atStartOfDay(java.time.ZoneOffset.UTC).toInstant().toEpochMilli()
-        val scheduled = ScheduledExerciseEntity(
-            id = java.util.UUID.randomUUID().toString(),
-            exerciseId = "ex1", // <-- Назначаем первое
-            scheduledDate = todayUtc,
-            status = "PLANNED"
+        val ex2 = ProgramExerciseEntity(
+            id = "ex2", programId = programId, exerciseType = "FINGER",
+            targetReps = 5, targetSets = 2, restSeconds = 10, orderIndex = 1
         )
-        db.scheduledExerciseDao().upsert(scheduled)
-    }
+        val ex3 = ProgramExerciseEntity(
+            id = "ex3", programId = programId, exerciseType = "FINGER",
+            targetReps = 5, targetSets = 2, restSeconds = 10, orderIndex = 2
+        )
+        db.programExerciseDao().upsertAll(listOf(ex1, ex2, ex3))
 
-    fun phaseName(orderIndex: Int): String = when (orderIndex) {
-        0 -> "Утренний комплекс"
-        else -> "Упражнение ${orderIndex + 1}"
+        // 👇 Создаем 3 назначения на сегодня (каждое упражнение - отдельная запись)
+        val todayUtc = LocalDate.now().atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli()
+
+        val scheduledList = listOf(
+            ScheduledExerciseEntity(id = UUID.randomUUID().toString(), exerciseId = "ex1", scheduledDate = todayUtc, status = "PLANNED"),
+            ScheduledExerciseEntity(id = UUID.randomUUID().toString(), exerciseId = "ex2", scheduledDate = todayUtc, status = "PLANNED"),
+            ScheduledExerciseEntity(id = UUID.randomUUID().toString(), exerciseId = "ex3", scheduledDate = todayUtc, status = "PLANNED")
+        )
+        scheduledList.forEach { db.scheduledExerciseDao().upsert(it) }
     }
 }

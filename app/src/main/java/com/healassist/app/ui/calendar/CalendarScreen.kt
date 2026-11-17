@@ -4,14 +4,14 @@ import android.content.Intent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material.icons.filled.ChevronRight
-import androidx.compose.material.icons.filled.CheckCircle // Импорт для галочки
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -20,7 +20,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
@@ -41,35 +40,24 @@ private val ColorGreen = Color(0xFF4CAF50)
 fun CalendarScreen(vm: CalendarViewModel = viewModel()) {
     val context = LocalContext.current
     val selectedDate by vm.selectedDate.collectAsState()
-    val exercises by vm.exercises.collectAsState()
+    val dailyExercises by vm.dailyExercises.collectAsState()
 
     var displayedMonth by remember { mutableStateOf(YearMonth.from(selectedDate)) }
 
-    // Слушатель возврата на экран (чтобы обновить статус "Выполнено")
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) {
-                vm.refresh()
-            }
+            if (event == Lifecycle.Event.ON_RESUME) vm.refresh()
         }
         lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose {
-            lifecycleOwner.lifecycle.removeObserver(observer)
-        }
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     LaunchedEffect(selectedDate) {
-        if (YearMonth.from(selectedDate) != displayedMonth) {
-            displayedMonth = YearMonth.from(selectedDate)
-        }
+        if (YearMonth.from(selectedDate) != displayedMonth) displayedMonth = YearMonth.from(selectedDate)
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(title = { Text("HealAssist") })
-        }
-    ) { padding ->
+    Scaffold(topBar = { TopAppBar(title = { Text("HealAssist") }) }) { padding ->
         Column(modifier = Modifier.padding(padding).fillMaxSize()) {
 
             // Заголовок с месяцем и стрелками
@@ -82,93 +70,89 @@ fun CalendarScreen(vm: CalendarViewModel = viewModel()) {
                     val newDate = selectedDate.minusWeeks(1)
                     displayedMonth = YearMonth.from(newDate)
                     vm.selectDate(newDate)
-                }) {
-                    Icon(Icons.Default.ChevronLeft, contentDescription = "Назад")
-                }
+                }) { Icon(Icons.Default.ChevronLeft, "Назад") }
 
                 Text(
                     text = displayedMonth.month.getDisplayName(TextStyle.FULL, Locale("ru"))
                         .replaceFirstChar { it.uppercase() } + " " + displayedMonth.year,
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold
+                    fontSize = 18.sp, fontWeight = FontWeight.Bold
                 )
-
                 IconButton(onClick = {
                     val newDate = selectedDate.plusWeeks(1)
                     displayedMonth = YearMonth.from(newDate)
                     vm.selectDate(newDate)
-                }) {
-                    Icon(Icons.Default.ChevronRight, contentDescription = "Вперед")
-                }
+                }) { Icon(Icons.Default.ChevronRight, "Вперед") }
             }
 
             // Лента дней
-            DaysStrip(
-                month = displayedMonth,
-                selectedDate = selectedDate,
-                onDateClick = { vm.selectDate(it) }
-            )
-
+            DaysStrip(month = displayedMonth, selectedDate = selectedDate, onDateClick = { vm.selectDate(it) })
             HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
 
-            // Список заданий
-            if (exercises.isEmpty()) {
+            // Список карточек на день
+            if (dailyExercises.isEmpty()) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text("На этот день упражнений нет.", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             } else {
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    items(exercises) { item ->
-                        val isDone = item.scheduled.status == ScheduledStatus.DONE
+                val doneCount = dailyExercises.count { it.status == ScheduledStatus.DONE }
+                val totalCount = dailyExercises.size
+                val isAllDone = doneCount == totalCount
 
-                        Card(
-                            modifier = Modifier.fillMaxWidth(),
-                            colors = CardDefaults.cardColors(
-                                containerColor = if (isDone) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.surface
-                            )
+                // Ищем первое невыполненное упражнение для запуска
+                val nextPendingExerciseId = dailyExercises.firstOrNull { it.status == ScheduledStatus.PLANNED }?.exerciseId
+
+                Column(modifier = Modifier.padding(16.dp)) {
+                    // Карточка "Утренний комплекс"
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(enabled = !isAllDone) {
+                                if (nextPendingExerciseId != null) {
+                                    val intent = Intent(context, SessionActivity::class.java).apply {
+                                        putExtra(SessionActivity.EXTRA_EXERCISE_ID, nextPendingExerciseId)
+                                    }
+                                    context.startActivity(intent)
+                                }
+                            },
+                        colors = CardDefaults.cardColors(
+                            containerColor = if (isAllDone) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.surface
+                        )
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(16.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Column(modifier = Modifier.padding(16.dp)) {
+                            Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    text = "Утренний комплекс", // <-- ИЗМЕНЕНО НАЗВАНИЕ
+                                    text = "Утренний комплекс",
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 16.sp
                                 )
                                 Spacer(modifier = Modifier.height(4.dp))
-                                Text("Подходы: ${item.exercise.targetSets} x ${item.exercise.targetReps}")
 
-                                if (isDone) {
-                                    Spacer(modifier = Modifier.height(8.dp))
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Icon(
-                                            Icons.Default.CheckCircle,
-                                            contentDescription = null,
-                                            tint = ColorGreen,
-                                            modifier = Modifier.size(20.dp)
-                                        )
-                                        Spacer(modifier = Modifier.width(4.dp))
-                                        Text(
-                                            text = "Выполнено",
-                                            color = ColorGreen,
-                                            fontWeight = FontWeight.Medium
-                                        )
-                                    }
-                                } else {
-                                    Button(
-                                        onClick = {
-                                            val intent = Intent(context, SessionActivity::class.java).apply {
-                                                putExtra(SessionActivity.EXTRA_EXERCISE_ID, item.exercise.id)
-                                            }
-                                            context.startActivity(intent)
-                                        },
-                                        modifier = Modifier.padding(top = 8.dp)
-                                    ) {
-                                        Text("Начать")
-                                    }
-                                }
+                                // Счетчик выполненных упражнений
+                                Text(
+                                    text = "Выполнено $doneCount из $totalCount упражнений",
+                                    fontSize = 14.sp,
+                                    color = if (isAllDone) ColorGreen else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+
+                            // Иконка в правой части карточки
+                            if (isAllDone) {
+                                Icon(
+                                    Icons.Default.CheckCircle,
+                                    contentDescription = null,
+                                    tint = ColorGreen,
+                                    modifier = Modifier.size(28.dp)
+                                )
+                            } else {
+                                Icon(
+                                    Icons.Default.PlayArrow,
+                                    contentDescription = "Начать",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(28.dp)
+                                )
                             }
                         }
                     }
@@ -179,13 +163,8 @@ fun CalendarScreen(vm: CalendarViewModel = viewModel()) {
 }
 
 @Composable
-private fun DaysStrip(
-    month: YearMonth,
-    selectedDate: LocalDate,
-    onDateClick: (LocalDate) -> Unit
-) {
+private fun DaysStrip(month: YearMonth, selectedDate: LocalDate, onDateClick: (LocalDate) -> Unit) {
     val days = (1..month.lengthOfMonth()).map { month.atDay(it) }
-
     LazyRow(
         modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
         contentPadding = PaddingValues(horizontal = 16.dp),
@@ -193,27 +172,18 @@ private fun DaysStrip(
     ) {
         items(days) { date ->
             val isSelected = date == selectedDate
-
             Column(
-                modifier = Modifier
-                    .width(48.dp)
-                    .clip(CircleShape)
-                    .clickable { onDateClick(date) }
-                    .padding(vertical = 8.dp),
+                modifier = Modifier.width(48.dp).clip(CircleShape).clickable { onDateClick(date) }.padding(vertical = 8.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Text(
-                    text = date.dayOfWeek.getDisplayName(TextStyle.SHORT, Locale("ru")).take(2)
-                        .replaceFirstChar { it.uppercase() },
+                    text = date.dayOfWeek.getDisplayName(TextStyle.SHORT, Locale("ru")).take(2).replaceFirstChar { it.uppercase() },
                     fontSize = 11.sp,
                     color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Box(
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clip(CircleShape)
-                        .background(if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent),
+                    modifier = Modifier.size(36.dp).clip(CircleShape).background(if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(

@@ -11,11 +11,6 @@ import kotlinx.coroutines.launch
 import java.time.LocalDate
 import java.time.ZoneOffset
 
-data class DayExercise(
-    val scheduled: ScheduledExerciseEntity,
-    val exercise: ProgramExerciseEntity
-)
-
 class CalendarViewModel(app: Application) : AndroidViewModel(app) {
     private val db = PoseCounterDatabase.get(app)
     private val scheduledDao = db.scheduledExerciseDao()
@@ -24,12 +19,13 @@ class CalendarViewModel(app: Application) : AndroidViewModel(app) {
     private val _selectedDate = MutableStateFlow(LocalDate.now())
     val selectedDate: StateFlow<LocalDate> = _selectedDate
 
-    private val _exercises = MutableStateFlow<List<DayExercise>>(emptyList())
-    val exercises: StateFlow<List<DayExercise>> = _exercises
+    // Храним список ВСЕХ упражнений на день
+    private val _dailyExercises = MutableStateFlow<List<ScheduledExerciseEntity>>(emptyList())
+    val dailyExercises: StateFlow<List<ScheduledExerciseEntity>> = _dailyExercises
 
     init {
         viewModelScope.launch(Dispatchers.IO) {
-            RehabSeed.seed(db) // Заполняем БД при старте (если пусто)
+            RehabSeed.seed(db)
             loadForDate(LocalDate.now())
         }
     }
@@ -39,7 +35,6 @@ class CalendarViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch(Dispatchers.IO) { loadForDate(date) }
     }
 
-    // Метод для обновления данных при возврате из камеры
     fun refresh() {
         viewModelScope.launch(Dispatchers.IO) {
             loadForDate(_selectedDate.value)
@@ -48,11 +43,12 @@ class CalendarViewModel(app: Application) : AndroidViewModel(app) {
 
     private suspend fun loadForDate(date: LocalDate) {
         val dateUtc = date.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli()
-        val items = scheduledDao.getForDate(dateUtc)
-        val result = items.mapNotNull { s ->
-            val ex = exerciseDao.findById(s.exerciseId) ?: return@mapNotNull null
-            DayExercise(s, ex)
-        }
-        _exercises.value = result
+        // Просто получаем все назначения на этот день
+        _dailyExercises.value = scheduledDao.getForDate(dateUtc)
+    }
+
+    // Вспомогательная функция для поиска первого невыполненного упражнения
+    fun getFirstPendingExerciseId(): String? {
+        return _dailyExercises.value.firstOrNull { it.status == ScheduledStatus.PLANNED }?.exerciseId
     }
 }
