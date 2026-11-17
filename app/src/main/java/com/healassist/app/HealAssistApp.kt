@@ -1,11 +1,13 @@
 package com.healassist.app
 
 import android.app.Application
-import com.healassist.app.data.CrashLogger
 
 class HealAssistApp : Application() {
     override fun onCreate() {
         super.onCreate()
-        CrashLogger.init(this)
+        // Инициализируем TTS при старте приложения
+        TtsManager.init(this)
+        // Инициализация логгера крашей (если он у вас был)
+        // CrashLogger.init(this)
     }
 }

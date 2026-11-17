@@ -163,8 +163,8 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="12dp"
-            android:backgroundTint="#2196F3"
+            android:backgroundTint="#F44336"
             android:textColor="@android:color/white"
-            android:text="Пауза" />
+            android:text="Выход" />
     </LinearLayout>
 </FrameLayout>

@@ -6,8 +6,6 @@ import android.graphics.Bitmap
 import android.graphics.Matrix
 import android.os.Bundle
 import android.os.SystemClock
-import android.speech.tts.TextToSpeech
-import android.speech.tts.UtteranceProgressListener
 import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
@@ -23,15 +21,14 @@ import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult
 import com.healassist.app.camera.GestureAnalyzer
 import com.healassist.app.camera.HandGesture
 import com.healassist.app.camera.HandLandmarkerHelper
-import com.healassist.app.camera.OverlayView
 import com.healassist.app.data.ExerciseModel
 import com.healassist.app.data.ExerciseType
 import com.healassist.app.data.PoseCounterDatabase
+import com.healassist.app.data.ScheduledStatus
+import com.healassist.app.TtsManager // <-- Импортируем наш синглтон
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -39,41 +36,40 @@ class SessionActivity : AppCompatActivity() {
 
     companion object {
         const val EXTRA_EXERCISE_ID = "exercise_id"
+        const val EXTRA_PENDING_LIST = "pending_list"
     }
 
     private lateinit var viewFinder: PreviewView
-    private lateinit var overlay: OverlayView
     private lateinit var targetText: TextView
     private lateinit var progressText: TextView
     private lateinit var statusText: TextView
-    private lateinit var pauseButton: Button
+    private lateinit var exitButton: Button
     private lateinit var restTimerText: TextView
 
     private var helper: HandLandmarkerHelper? = null
     private var cameraProvider: ProcessCameraProvider? = null
     private val cameraExecutor: ExecutorService = Executors.newSingleThreadExecutor()
 
-    private var tts: TextToSpeech? = null
-    private var isTtsReady = false
-
-    private val exercises = listOf(
+    private val allExercises = listOf(
         ExerciseModel("ex1", "Съжатие кулака", "Сожьмите руку в кулак, заъдержите на пару секунд и полностью его разожмите.", 2, 5, 10, ExerciseType.FINGER),
         ExerciseModel("ex2", "Веер", "Раскройте ладонь и максимально широко разведите все пальцы в стороны, затем сведите их вместе.", 2, 5, 10, ExerciseType.FINGER),
-        ExerciseModel("ex3", "Когти", "Согните пальцы в средних суставах, имитируя кошачьи когти, не сжимая кулак. Затем выпрямите.", 2, 5, 10, ExerciseType.FINGER)
+        ExerciseModel("ex3", "Когти", "Согните пальцы в средних суставах, имитируя кошачьи когти, не сжимая кулак. Затем выпрямите.", 2, 5, 10, ExerciseType.FINGER),
+        ExerciseModel("ex4", "Подушечки", "Большим пальцем поочередно касайтесь подушечек остальных пальцев.", 2, 5, 10, ExerciseType.FINGER),
+        ExerciseModel("ex5", "Стена", "Ладонь на столе. По очереди отрывайте каждый палец от поверхности.", 2, 5, 10, ExerciseType.FINGER),
+        ExerciseModel("ex6", "Пианино", "Постучите подушечками пальцев по столу, имитируя игру на пианино.", 2, 5, 10, ExerciseType.FINGER)
     )
 
-    private var currentExerciseIndex = 0
-    private val currentExercise get() = exercises[currentExerciseIndex]
+    private var currentExerciseId = ""
+    private val currentExercise get() = allExercises.find { it.id == currentExerciseId } ?: allExercises[0]
+
+    private var pendingIds = mutableListOf<String>()
 
     private var lastGesture = HandGesture.NONE
     private var isFistConfirmed = false
     private var currentSet = 1
     private var repsInSet = 0
-    private var isPaused = false
     private var lastTimestampMs = 0L
     private var isDestroyed = false
-
-    private var exerciseIdFromDb: String? = null
 
     private val requestPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -86,54 +82,35 @@ class SessionActivity : AppCompatActivity() {
         setContentView(com.healassist.app.R.layout.activity_session)
 
         viewFinder = findViewById(com.healassist.app.R.id.sessionViewFinder)
-        overlay = findViewById(com.healassist.app.R.id.sessionOverlay)
         targetText = findViewById(com.healassist.app.R.id.sessionTarget)
         progressText = findViewById(com.healassist.app.R.id.sessionProgress)
         statusText = findViewById(com.healassist.app.R.id.sessionStatus)
-        pauseButton = findViewById(com.healassist.app.R.id.sessionPauseButton)
+        exitButton = findViewById(com.healassist.app.R.id.sessionPauseButton)
         restTimerText = findViewById(com.healassist.app.R.id.restTimerText)
 
-        exerciseIdFromDb = intent.getStringExtra(EXTRA_EXERCISE_ID)
-
-        initTts()
-
-        pauseButton.setOnClickListener {
-            isPaused = !isPaused
-            pauseButton.text = if (isPaused) "Продолжить" else "Пауза"
+        exitButton.text = "Выход"
+        exitButton.setOnClickListener {
+            TtsManager.stop() // Останавливаем речь при выходе
+            finish()
         }
 
+        currentExerciseId = intent.getStringExtra(EXTRA_EXERCISE_ID) ?: "ex1"
+        pendingIds = intent.getStringArrayListExtra(EXTRA_PENDING_LIST) ?: mutableListOf(currentExerciseId)
+
+        updateCircles()
         updateUi()
+
+        // Говорим инструкцию с задержкой, чтобы фраза про телефон успела закончиться
+        lifecycleScope.launch {
+            delay(4500L) // Ждем 4.5 секунды
+            TtsManager.speak("${currentExercise.name}. ${currentExercise.instruction}")
+        }
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             startCamera()
         } else {
             requestPermission.launch(Manifest.permission.CAMERA)
         }
-    }
-
-    private fun initTts() {
-        tts = TextToSpeech(this) { status ->
-            if (status == TextToSpeech.SUCCESS) {
-                val result = tts?.setLanguage(Locale("ru", "RU"))
-                if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
-                    isTtsReady = false
-                } else {
-                    isTtsReady = true
-                    speakInstruction()
-                }
-            } else {
-                isTtsReady = false
-            }
-        }
-    }
-
-    private fun speak(text: String) {
-        if (!isTtsReady) return
-        tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "tts_${System.currentTimeMillis()}")
-    }
-
-    private fun speakInstruction() {
-        speak("${currentExercise.name}. ${currentExercise.instruction}")
     }
 
     private fun startCamera() {
@@ -168,7 +145,6 @@ class SessionActivity : AppCompatActivity() {
         analysis.setAnalyzer(cameraExecutor, ::analyzeFrame)
 
         val selector = if (provider.hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA)) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
-        overlay.mirrored = (selector == CameraSelector.DEFAULT_FRONT_CAMERA)
 
         try {
             provider.unbindAll()
@@ -213,8 +189,6 @@ class SessionActivity : AppCompatActivity() {
         }
         statusText.text = "Статус: $statusMessage"
 
-        if (isPaused) return
-
         if (gesture == HandGesture.FIST) isFistConfirmed = true
 
         if (isFistConfirmed && gesture == HandGesture.OPEN_PALM) {
@@ -222,7 +196,7 @@ class SessionActivity : AppCompatActivity() {
             repsInSet++
             updateUi()
 
-            speak("$repsInSet")
+            TtsManager.speak("$repsInSet")
 
             if (repsInSet >= currentExercise.repsPerSet) {
                 if (currentSet >= currentExercise.targetSets) {
@@ -239,12 +213,11 @@ class SessionActivity : AppCompatActivity() {
     }
 
     private fun startRest() {
-        isPaused = true
         val restSec = currentExercise.restBetweenSetsSec
         statusText.text = "Отдых"
         restTimerText.visibility = android.view.View.VISIBLE
 
-        speak("Подход завершен. Отдых $restSec секунд.")
+        TtsManager.speak("Подход завершен. Отдых $restSec секунд.")
 
         lifecycleScope.launch {
             var timeLeft = restSec
@@ -254,57 +227,63 @@ class SessionActivity : AppCompatActivity() {
                 timeLeft--
             }
             restTimerText.visibility = android.view.View.GONE
-            isPaused = false
             lastGesture = HandGesture.NONE
             statusText.text = "Продолжаем!"
-            speak("Продолжаем выполнение.")
+            TtsManager.speak("Продолжаем выполнение.")
         }
     }
 
     private fun finishCurrentExercise() {
-        isPaused = true
-
-        // Сохраняем в базу
-        if (exerciseIdFromDb != null) {
-            lifecycleScope.launch(Dispatchers.IO) {
-                val db = PoseCounterDatabase.get(this@SessionActivity)
-                val todayUtc = java.time.LocalDate.now().atStartOfDay(java.time.ZoneOffset.UTC).toInstant().toEpochMilli()
-                val schedules = db.scheduledExerciseDao().getForDate(todayUtc)
-                val schedule = schedules.find { it.exerciseId == exerciseIdFromDb }
-                if (schedule != null) {
-                    db.scheduledExerciseDao().markStatus(schedule.id, "DONE", null)
-                }
+        lifecycleScope.launch(Dispatchers.IO) {
+            val db = PoseCounterDatabase.get(this@SessionActivity)
+            val todayUtc = java.time.LocalDate.now().atStartOfDay(java.time.ZoneOffset.UTC).toInstant().toEpochMilli()
+            val schedules = db.scheduledExerciseDao().getForDate(todayUtc)
+            val schedule = schedules.find { it.exerciseId == currentExerciseId }
+            if (schedule != null) {
+                db.scheduledExerciseDao().markStatus(schedule.id, ScheduledStatus.DONE, null)
             }
         }
 
-        speak("Упражнение ${currentExercise.name} выполнено.")
+        TtsManager.speak("Упражнение ${currentExercise.name} выполнено.")
 
-        val circleIds = listOf(
-            com.healassist.app.R.id.circle1, com.healassist.app.R.id.circle2, com.healassist.app.R.id.circle3,
-            com.healassist.app.R.id.circle4, com.healassist.app.R.id.circle5, com.healassist.app.R.id.circle6
-        )
-        findViewById<TextView>(circleIds[currentExerciseIndex]).setBackgroundResource(com.healassist.app.R.drawable.circle_completed)
+        updateCircles(completedId = currentExerciseId)
 
-        // Ждем 3 секунды перед переходом, чтобы ассистент успел договорить
         lifecycleScope.launch {
             delay(3000L)
 
-            if (currentExerciseIndex < exercises.size - 1) {
-                currentExerciseIndex++
+            pendingIds.remove(currentExerciseId)
+
+            if (pendingIds.isNotEmpty()) {
+                currentExerciseId = pendingIds.first()
                 currentSet = 1
                 repsInSet = 0
                 isFistConfirmed = false
                 lastGesture = HandGesture.NONE
 
-                findViewById<TextView>(circleIds[currentExerciseIndex - 1]).setBackgroundResource(com.healassist.app.R.drawable.circle_completed)
-                findViewById<TextView>(circleIds[currentExerciseIndex]).setBackgroundResource(com.healassist.app.R.drawable.circle_active)
-
+                updateCircles()
                 updateUi()
-                isPaused = false
-                speakInstruction()
+                TtsManager.speak("${currentExercise.name}. ${currentExercise.instruction}")
             } else {
                 Toast.makeText(this@SessionActivity, "Все упражнения выполнены!", Toast.LENGTH_LONG).show()
                 finish()
+            }
+        }
+    }
+
+    private fun updateCircles(completedId: String? = null) {
+        val circleIds = listOf(
+            com.healassist.app.R.id.circle1, com.healassist.app.R.id.circle2, com.healassist.app.R.id.circle3,
+            com.healassist.app.R.id.circle4, com.healassist.app.R.id.circle5, com.healassist.app.R.id.circle6
+        )
+
+        for (i in allExercises.indices) {
+            val exId = allExercises[i].id
+            val circle = findViewById<TextView>(circleIds[i])
+
+            when {
+                exId == currentExerciseId -> circle.setBackgroundResource(com.healassist.app.R.drawable.circle_active)
+                !pendingIds.contains(exId) -> circle.setBackgroundResource(com.healassist.app.R.drawable.circle_completed)
+                else -> circle.setBackgroundResource(com.healassist.app.R.drawable.circle_inactive)
             }
         }
     }
@@ -319,8 +298,6 @@ class SessionActivity : AppCompatActivity() {
         super.onDestroy()
         cameraExecutor.shutdown()
         helper?.close()
-        tts?.stop()
-        tts?.shutdown()
-        tts = null
+        // TtsManager.shutdown() НЕ вызываем здесь, чтобы не убивать глобальный TTS
     }
 }

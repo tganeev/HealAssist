@@ -107,9 +107,15 @@ fun CalendarScreen(vm: CalendarViewModel = viewModel()) {
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable(enabled = !isAllDone) {
-                                if (nextPendingExerciseId != null) {
+                                val pendingIds = dailyExercises.filter { it.status == ScheduledStatus.PLANNED }.map { it.exerciseId }
+                                if (pendingIds.isNotEmpty()) {
+                                    // 1. СРАЗУ ГОВОРИМ ФРАЗУ (пока экран еще не переключился)
+                                    com.healassist.app.TtsManager.speak("Поставъте телефон перед собой таким образом, чтобы в камеру вы видели свои руки.")
+
+                                    // 2. ЗАПУСКАЕМ АКТИВИТИ
                                     val intent = Intent(context, SessionActivity::class.java).apply {
-                                        putExtra(SessionActivity.EXTRA_EXERCISE_ID, nextPendingExerciseId)
+                                        putExtra(SessionActivity.EXTRA_EXERCISE_ID, pendingIds.first())
+                                        putExtra(SessionActivity.EXTRA_PENDING_LIST, ArrayList(pendingIds))
                                     }
                                     context.startActivity(intent)
                                 }
