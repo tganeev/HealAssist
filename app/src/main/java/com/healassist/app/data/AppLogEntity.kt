@@ -23,4 +23,7 @@ interface AppLogDao {
 
     @Insert
     suspend fun insert(log: AppLogEntity)
+
+    @Query("DELETE FROM app_log")
+    suspend fun clear()
 }

@@ -26,6 +26,7 @@ import com.healassist.app.data.ExerciseType
 import com.healassist.app.data.PoseCounterDatabase
 import com.healassist.app.data.ScheduledStatus
 import com.healassist.app.TtsManager
+import com.healassist.app.utils.AppLogger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -39,10 +40,7 @@ class SessionActivity : AppCompatActivity() {
         const val EXTRA_PENDING_LIST = "pending_list"
         const val EXTRA_IS_FIRST = "is_first"
 
-        /** ID упражнения "Веер" — для него используется специальный анализатор. */
         private const val EXERCISE_FAN_ID = "ex2"
-
-        /** ID первого упражнения — для него произносится инструкция про телефон. */
         private const val EXERCISE_FIRST_ID = "ex1"
     }
 
@@ -80,6 +78,16 @@ class SessionActivity : AppCompatActivity() {
     private var lastTimestampMs = 0L
     private var isDestroyed = false
 
+    /**
+     * Флаг "идёт завершение упражнения / отдых / переход к следующему".
+     * Пока true — processResult() НЕ должен считать повторы и НЕ должен
+     * повторно вызывать finishCurrentExercise(). Это устраняет двойное
+     * засчитывание и "проскок" через упражнение.
+     */
+    private var isProcessingTransition = false
+
+    private var lastGestureLogTime = 0L
+
     private val requestPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             if (granted) startCamera()
@@ -107,11 +115,14 @@ class SessionActivity : AppCompatActivity() {
         pendingIds = intent.getStringArrayListExtra(EXTRA_PENDING_LIST) ?: mutableListOf(currentExerciseId)
         isFirstExerciseInSession = intent.getBooleanExtra(EXTRA_IS_FIRST, false)
 
+        AppLogger.log(
+            "SESSION",
+            "Session started: exercise=$currentExerciseId, pending=$pendingIds, isFirst=$isFirstExerciseInSession"
+        )
+
         updateCircles()
         updateUi()
 
-        // Фраза про телефон — ТОЛЬКО если первое упражнение (ex1) ещё не выполнено
-        // и присутствует в текущей сессии.
         val shouldAnnouncePhoneSetup =
             isFirstExerciseInSession && pendingIds.contains(EXERCISE_FIRST_ID)
 
@@ -122,29 +133,25 @@ class SessionActivity : AppCompatActivity() {
             )
             TtsManager.speak(exerciseAnnouncement(), flushQueue = false)
             isFirstExerciseInSession = false
+            AppLogger.log("TTS", "Phone setup phrase + exercise announcement queued")
         } else {
             TtsManager.speak(exerciseAnnouncement())
+            AppLogger.log("TTS", "Exercise announcement queued: $currentExerciseId")
         }
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             startCamera()
         } else {
+            AppLogger.log("CAMERA", "Camera permission not granted, requesting")
             requestPermission.launch(Manifest.permission.CAMERA)
         }
     }
 
-    /**
-     * Фраза-объявление упражнения: "Упражнение первое. <название>. <инструкция>".
-     * Номер упражнения ФИКСИРОВАН по позиции в allExercises:
-     *   ex1 -> первое, ex2 -> второе, ex3 -> третье и т.д.
-     * Это не зависит от того, с какого упражнения начата текущая сессия.
-     */
     private fun exerciseAnnouncement(): String {
         val ordinal = ordinalWord(ordinalNumberForCurrentExercise())
         return "Упражнение $ordinal. ${currentExercise.name}. ${currentExercise.instruction}"
     }
 
-    /** Порядковый номер текущего упражнения в allExercises (1-based). */
     private fun ordinalNumberForCurrentExercise(): Int {
         val idx = allExercises.indexOfFirst { it.id == currentExerciseId }
         return if (idx >= 0) idx + 1 else 1
@@ -171,8 +178,12 @@ class SessionActivity : AppCompatActivity() {
                     context = this,
                     modelFile = "hand_landmarker.task",
                     onResult = { r, w, h -> runOnUiThread { processResult(r, w, h) } },
-                    onError = { msg -> runOnUiThread { statusText.text = "Ошибка: $msg" } },
+                    onError = { msg ->
+                        AppLogger.log("MEDIAPIPE", "HandLandmarker error: $msg")
+                        runOnUiThread { statusText.text = "Ошибка: $msg" }
+                    },
                 )
+                AppLogger.log("CAMERA", "HandLandmarkerHelper created, model=hand_landmarker.task")
 
                 val future = ProcessCameraProvider.getInstance(this)
                 future.addListener({
@@ -180,6 +191,7 @@ class SessionActivity : AppCompatActivity() {
                     bindCamera()
                 }, ContextCompat.getMainExecutor(this))
             } catch (e: Exception) {
+                AppLogger.log("CAMERA", "Camera init failed: ${e.message}")
                 Toast.makeText(this, "Ошибка инициализации: ${e.message}", Toast.LENGTH_LONG).show()
                 finish()
             }
@@ -201,7 +213,12 @@ class SessionActivity : AppCompatActivity() {
         try {
             provider.unbindAll()
             provider.bindToLifecycle(this, selector, preview, analysis)
+            AppLogger.log(
+                "CAMERA",
+                "Camera bound: ${if (selector == CameraSelector.DEFAULT_FRONT_CAMERA) "FRONT" else "BACK"}"
+            )
         } catch (e: Exception) {
+            AppLogger.log("CAMERA", "Camera bind failed: ${e.message}")
             Toast.makeText(this, "Ошибка камеры: ${e.message}", Toast.LENGTH_LONG).show()
         }
     }
@@ -226,6 +243,19 @@ class SessionActivity : AppCompatActivity() {
     }
 
     private fun processResult(result: HandLandmarkerResult, imageWidth: Int, imageHeight: Int) {
+        val now = System.currentTimeMillis()
+        if (now - lastGestureLogTime > 1000) {
+            lastGestureLogTime = now
+            if (result.landmarks().isEmpty()) {
+                AppLogger.log("HAND_DETECT", "No hand in frame (exercise=$currentExerciseId)")
+            } else {
+                AppLogger.log(
+                    "HAND_DETECT",
+                    "Hand detected, landmarks=${result.landmarks()[0].size}, exercise=$currentExerciseId"
+                )
+            }
+        }
+
         if (result.landmarks().isEmpty()) {
             statusText.text = "Статус: Рука не найдена"
             lastGesture = HandGesture.NONE
@@ -234,8 +264,6 @@ class SessionActivity : AppCompatActivity() {
 
         val hand = result.landmarks()[0]
 
-        // Для "Веера" используем специальный анализатор (пальцы сведены/разведены),
-        // для остальных упражнений — общий (кулак/ладонь).
         val gesture = if (currentExerciseId == EXERCISE_FAN_ID) {
             GestureAnalyzer.analyzeFan(hand)
         } else {
@@ -254,14 +282,23 @@ class SessionActivity : AppCompatActivity() {
         }
         statusText.text = "Статус: $statusMessage"
 
-        // Счётчик: сведены (FIST) -> разведены (OPEN_PALM) = 1 повтор.
-        // Для "Веера" семантика та же: FIST = "сведены", OPEN_PALM = "разведены".
+        // КРИТИЧНО: во время завершения упражнения / отдыха / перехода
+        // не считаем повторы и не вызываем finishCurrentExercise повторно.
+        if (isProcessingTransition) {
+            return
+        }
+
         if (gesture == HandGesture.FIST) isFistConfirmed = true
 
         if (isFistConfirmed && gesture == HandGesture.OPEN_PALM) {
             isFistConfirmed = false
             repsInSet++
             updateUi()
+
+            AppLogger.log(
+                "REP",
+                "exercise=$currentExerciseId, set=$currentSet, rep=$repsInSet, gesture=$gesture"
+            )
 
             TtsManager.speak("$repsInSet")
 
@@ -284,6 +321,12 @@ class SessionActivity : AppCompatActivity() {
         statusText.text = "Отдых"
         restTimerText.visibility = android.view.View.VISIBLE
 
+        // Сбрасываем жест и подтверждение "сведено", чтобы после отдыха
+        // повтор засчитывался только при новом цикле "свели -> развели".
+        isFistConfirmed = false
+        lastGesture = HandGesture.NONE
+
+        AppLogger.log("REST", "Rest started: exercise=$currentExerciseId, set=$currentSet, restSec=$restSec")
         TtsManager.speak("Подход завершен. Отдых $restSec секунд.")
 
         lifecycleScope.launch {
@@ -294,6 +337,9 @@ class SessionActivity : AppCompatActivity() {
                 timeLeft--
             }
             restTimerText.visibility = android.view.View.GONE
+            // После отдыха пользователь должен снова свести пальцы,
+            // прежде чем засчитается следующий повтор.
+            isFistConfirmed = false
             lastGesture = HandGesture.NONE
             statusText.text = "Продолжаем!"
             TtsManager.speak("Продолжаем выполнение.")
@@ -301,6 +347,16 @@ class SessionActivity : AppCompatActivity() {
     }
 
     private fun finishCurrentExercise() {
+        // Защита от двойного вызова (из-за гонки при вызове из processResult
+        // и корутина).
+        if (isProcessingTransition) return
+        isProcessingTransition = true
+
+        AppLogger.log(
+            "FINISH",
+            "Exercise completed: $currentExerciseId (sets=${currentExercise.targetSets}, reps/set=${currentExercise.repsPerSet})"
+        )
+
         lifecycleScope.launch(Dispatchers.IO) {
             val db = PoseCounterDatabase.get(this@SessionActivity)
             val todayUtc = java.time.LocalDate.now().atStartOfDay(java.time.ZoneOffset.UTC).toInstant().toEpochMilli()
@@ -308,6 +364,9 @@ class SessionActivity : AppCompatActivity() {
             val schedule = schedules.find { it.exerciseId == currentExerciseId }
             if (schedule != null) {
                 db.scheduledExerciseDao().markStatus(schedule.id, ScheduledStatus.DONE, null)
+                AppLogger.log("DB", "Marked exercise as DONE: $currentExerciseId")
+            } else {
+                AppLogger.log("DB", "No schedule found for $currentExerciseId on today")
             }
         }
 
@@ -327,11 +386,18 @@ class SessionActivity : AppCompatActivity() {
                 isFistConfirmed = false
                 lastGesture = HandGesture.NONE
 
+                AppLogger.log("SESSION", "Next exercise: $currentExerciseId, pending=$pendingIds")
+
                 updateCircles()
                 updateUi()
                 TtsManager.speak(exerciseAnnouncement())
+
+                // Переход завершён — можно снова считать повторы.
+                isProcessingTransition = false
             } else {
+                AppLogger.log("SESSION", "All exercises completed")
                 Toast.makeText(this@SessionActivity, "Все упражнения выполнены!", Toast.LENGTH_LONG).show()
+                // isProcessingTransition оставляем true — активити закрывается.
                 finish()
             }
         }
@@ -362,6 +428,7 @@ class SessionActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         isDestroyed = true
+        AppLogger.log("SESSION", "Session destroyed, currentExercise=$currentExerciseId")
         super.onDestroy()
         cameraExecutor.shutdown()
         helper?.close()
