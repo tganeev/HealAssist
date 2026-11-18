@@ -5,21 +5,19 @@ import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult
 import kotlin.math.hypot
 
 enum class HandGesture {
-    NONE,        // Руки нет в кадре
-    FIST,        // Кулак (Сжат) / для "Веера" — пальцы сведены
-    OPEN_PALM,   // Открытая ладонь (Разжат) / для "Веера" — пальцы разведены
-    UNKNOWN      // Что-то среднее (не засчитываем)
+    NONE,
+    FIST,
+    OPEN_PALM,
+    UNKNOWN
 }
 
 object GestureAnalyzer {
 
-    /** Общий анализ: кулак / открытая ладонь по вытянутости 4 пальцев. */
     fun analyze(result: HandLandmarkerResult): HandGesture {
         if (result.landmarks().isEmpty()) return HandGesture.NONE
-        return analyze( result.landmarks()[0])
+        return analyze(result.landmarks()[0])
     }
 
-    /** То же, но по списку лендмарков одной руки. */
     fun analyze(hand: List<NormalizedLandmark>): HandGesture {
         if (hand.size < 21) return HandGesture.NONE
 
@@ -33,42 +31,88 @@ object GestureAnalyzer {
         ).count { it }
 
         return when {
-            extendedCount == 4 -> HandGesture.OPEN_PALM // Все 4 пальца вытянуты
-            extendedCount == 0 -> HandGesture.FIST      // Все 4 пальца сжаты
-            else -> HandGesture.UNKNOWN                 // Промежуточное состояние
+            extendedCount == 4 -> HandGesture.OPEN_PALM
+            extendedCount == 0 -> HandGesture.FIST
+            else -> HandGesture.UNKNOWN
         }
     }
 
     /**
-     * Специальный анализ для упражнения "Веер" (ex2):
-     *  - пальцы должны быть прямыми (указательный и мизинец вытянуты);
-     *  - считаем spreadRatio = (сумма расстояний между кончиками соседних пальцев) / длина ладони;
-     *  - spreadRatio > 1.7  -> OPEN_PALM ("пальцы разведены");
-     *  - иначе              -> FIST      ("пальцы сведены");
-     *  - если пальцы согнуты -> UNKNOWN  (не засчитываем).
+     * "Веер" (ex2) с гистерезисом.
+     * @param previous предыдущий жест (для гистерезиса на границе порога).
      */
-    fun analyzeFan(hand: List<NormalizedLandmark>): HandGesture {
+    fun analyzeFan(
+        hand: List<NormalizedLandmark>,
+        previous: HandGesture = HandGesture.UNKNOWN
+    ): HandGesture {
         if (hand.size < 21) return HandGesture.NONE
 
-        val dist1_2 = dist(hand[8], hand[12])
-        val dist2_3 = dist(hand[12], hand[16])
-        val dist3_4 = dist(hand[16], hand[20])
-
-        val totalSpread = dist1_2 + dist2_3 + dist3_4
+        val totalSpread = dist(hand[8], hand[12]) + dist(hand[12], hand[16]) + dist(hand[16], hand[20])
         val palmLength = dist(hand[0], hand[9])
-
         if (palmLength < 0.01f) return HandGesture.UNKNOWN
 
         val spreadRatio = totalSpread / palmLength
 
-        // Проверяем, что крайние пальцы прямые
         val isIndexExtended = isFingerExtended(hand[8], hand[5], hand[0])
         val isPinkyExtended = isFingerExtended(hand[20], hand[17], hand[0])
+        if (!isIndexExtended || !isPinkyExtended) return HandGesture.UNKNOWN
 
-        return if (!isIndexExtended || !isPinkyExtended) {
-            HandGesture.UNKNOWN // Рука в кулаке — не засчитываем
-        } else {
-            if (spreadRatio > 1.7f) HandGesture.OPEN_PALM else HandGesture.FIST
+        // Гистерезис: держим предыдущее состояние в "серой зоне"
+        return when {
+            spreadRatio > 1.80f -> HandGesture.OPEN_PALM
+            spreadRatio < 1.60f -> HandGesture.FIST
+            else -> when (previous) {
+                HandGesture.OPEN_PALM -> HandGesture.OPEN_PALM
+                HandGesture.FIST -> HandGesture.FIST
+                else -> if (spreadRatio > 1.70f) HandGesture.OPEN_PALM else HandGesture.FIST
+            }
+        }
+    }
+
+    /**
+     * "Когти" (ex3).
+     * ratio = dist(tip, wrist) / dist(mcp, wrist) для каждого пальца:
+     *   ratio < 0.9f   -> кулак
+     *   ratio < 1.6f   -> "коготь"
+     *   ratio >= 1.6f  -> прямой палец
+     *
+     * straightCount >= 3                          -> OPEN_PALM (ладонь прямая)
+     * clawCount >= 2 && straightCount == 0        -> FIST      ("когти")
+     * fistCount >= 3                              -> UNKNOWN   (кулак, не когти)
+     * иначе                                       -> UNKNOWN
+     */
+    fun analyzeClaw(hand: List<NormalizedLandmark>): HandGesture {
+        if (hand.size < 21) return HandGesture.NONE
+
+        val fingers = listOf(
+            Triple(8, 5, 0),
+            Triple(12, 9, 0),
+            Triple(16, 13, 0),
+            Triple(20, 17, 0)
+        )
+
+        var straightCount = 0
+        var clawCount = 0
+        var fistCount = 0
+
+        for ((tipIdx, mcpIdx, wristIdx) in fingers) {
+            val tipDist = dist(hand[tipIdx], hand[wristIdx])
+            val mcpDist = dist(hand[mcpIdx], hand[wristIdx])
+            if (mcpDist < 0.001f) continue
+            val ratio = tipDist / mcpDist
+
+            when {
+                ratio < 0.9f -> fistCount++
+                ratio < 1.6f -> clawCount++
+                else -> straightCount++
+            }
+        }
+
+        return when {
+            straightCount >= 3 -> HandGesture.OPEN_PALM
+            clawCount >= 2 && straightCount == 0 -> HandGesture.FIST
+            fistCount >= 3 -> HandGesture.UNKNOWN
+            else -> HandGesture.UNKNOWN
         }
     }
 

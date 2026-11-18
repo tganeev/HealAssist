@@ -41,7 +41,10 @@ class SessionActivity : AppCompatActivity() {
         const val EXTRA_IS_FIRST = "is_first"
 
         private const val EXERCISE_FAN_ID = "ex2"
+        private const val EXERCISE_CLAW_ID = "ex3"
         private const val EXERCISE_FIRST_ID = "ex1"
+
+        private const val GESTURE_STABLE_MS = 300L
     }
 
     private lateinit var viewFinder: PreviewView
@@ -78,15 +81,15 @@ class SessionActivity : AppCompatActivity() {
     private var lastTimestampMs = 0L
     private var isDestroyed = false
 
-    /**
-     * Флаг "идёт завершение упражнения / отдых / переход к следующему".
-     * Пока true — processResult() НЕ должен считать повторы и НЕ должен
-     * повторно вызывать finishCurrentExercise(). Это устраняет двойное
-     * засчитывание и "проскок" через упражнение.
-     */
     private var isProcessingTransition = false
-
+    private var isResting = false
     private var lastGestureLogTime = 0L
+
+    // --- Дебаунс состояния жеста ---
+    private var stableGesture: HandGesture = HandGesture.NONE
+    private var pendingGesture: HandGesture = HandGesture.NONE
+    private var pendingSinceMs = 0L
+    private var lastAnalyzedGesture: HandGesture = HandGesture.UNKNOWN
 
     private val requestPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -104,6 +107,8 @@ class SessionActivity : AppCompatActivity() {
         statusText = findViewById(com.healassist.app.R.id.sessionStatus)
         exitButton = findViewById(com.healassist.app.R.id.sessionPauseButton)
         restTimerText = findViewById(com.healassist.app.R.id.restTimerText)
+
+        setupCircleClickListeners()
 
         exitButton.text = "Выход"
         exitButton.setOnClickListener {
@@ -145,6 +150,49 @@ class SessionActivity : AppCompatActivity() {
             AppLogger.log("CAMERA", "Camera permission not granted, requesting")
             requestPermission.launch(Manifest.permission.CAMERA)
         }
+    }
+
+    private fun setupCircleClickListeners() {
+        val circleIds = listOf(
+            com.healassist.app.R.id.circle1, com.healassist.app.R.id.circle2, com.healassist.app.R.id.circle3,
+            com.healassist.app.R.id.circle4, com.healassist.app.R.id.circle5, com.healassist.app.R.id.circle6
+        )
+        for (i in allExercises.indices) {
+            val circle = findViewById<TextView>(circleIds[i])
+            circle.setOnClickListener {
+                switchToExercise(allExercises[i].id)
+            }
+        }
+    }
+
+    /**
+     * Ручное переключение на упражнение по клику на круг.
+     * Сбрасывает локальный прогресс счётчиков для нового упражнения.
+     */
+    private fun switchToExercise(newExerciseId: String) {
+        if (newExerciseId == currentExerciseId) {
+            AppLogger.log("SESSION", "Switch ignored: already on $newExerciseId")
+            return
+        }
+        if (isProcessingTransition) {
+            AppLogger.log("SESSION", "Switch ignored: transition in progress")
+            return
+        }
+
+        AppLogger.log("SESSION", "Manual switch: $currentExerciseId -> $newExerciseId")
+
+        currentExerciseId = newExerciseId
+        currentSet = 1
+        repsInSet = 0
+        resetGestureState()
+        isResting = false
+
+        restTimerText.visibility = android.view.View.GONE
+        statusText.text = "Ожидание..."
+
+        updateCircles()
+        updateUi()
+        TtsManager.speak(exerciseAnnouncement())
     }
 
     private fun exerciseAnnouncement(): String {
@@ -242,6 +290,15 @@ class SessionActivity : AppCompatActivity() {
         return Bitmap.createBitmap(src, 0, 0, src.width, src.height, m, false)
     }
 
+    private fun resetGestureState() {
+        stableGesture = HandGesture.NONE
+        pendingGesture = HandGesture.NONE
+        pendingSinceMs = 0L
+        isFistConfirmed = false
+        lastGesture = HandGesture.NONE
+        lastAnalyzedGesture = HandGesture.UNKNOWN
+    }
+
     private fun processResult(result: HandLandmarkerResult, imageWidth: Int, imageHeight: Int) {
         val now = System.currentTimeMillis()
         if (now - lastGestureLogTime > 1000) {
@@ -264,40 +321,59 @@ class SessionActivity : AppCompatActivity() {
 
         val hand = result.landmarks()[0]
 
-        val gesture = if (currentExerciseId == EXERCISE_FAN_ID) {
-            GestureAnalyzer.analyzeFan(hand)
-        } else {
-            GestureAnalyzer.analyze(hand)
+        val gesture = when (currentExerciseId) {
+            EXERCISE_FAN_ID -> GestureAnalyzer.analyzeFan(hand, lastAnalyzedGesture)
+            EXERCISE_CLAW_ID -> GestureAnalyzer.analyzeClaw(hand)
+            else -> GestureAnalyzer.analyze(hand)
         }
 
         val statusMessage = when (gesture) {
             HandGesture.NONE -> "Рука не найдена"
-            HandGesture.OPEN_PALM -> {
-                if (currentExerciseId == EXERCISE_FAN_ID) "Пальцы разведены" else "Ладонь открыта"
+            HandGesture.OPEN_PALM -> when (currentExerciseId) {
+                EXERCISE_FAN_ID -> "Пальцы разведены"
+                EXERCISE_CLAW_ID -> "Ладонь выпрямлена"
+                else -> "Ладонь открыта"
             }
-            HandGesture.FIST -> {
-                if (currentExerciseId == EXERCISE_FAN_ID) "Пальцы сведены" else "Кулак сжат"
+            HandGesture.FIST -> when (currentExerciseId) {
+                EXERCISE_FAN_ID -> "Пальцы сведены"
+                EXERCISE_CLAW_ID -> "Когти"
+                else -> "Кулак сжат"
             }
             HandGesture.UNKNOWN -> "Промежуточное положение"
         }
         statusText.text = "Статус: $statusMessage"
 
-        // КРИТИЧНО: во время завершения упражнения / отдыха / перехода
-        // не считаем повторы и не вызываем finishCurrentExercise повторно.
-        if (isProcessingTransition) {
-            return
+        // Не считаем повторы во время перехода или отдыха.
+        if (isProcessingTransition || isResting) return
+
+        // --- ДЕБАУНС: жест должен удерживаться GESTURE_STABLE_MS ---
+        if (gesture != pendingGesture) {
+            pendingGesture = gesture
+            pendingSinceMs = now
         }
+        val confirmedGesture = if (now - pendingSinceMs >= GESTURE_STABLE_MS) gesture else stableGesture
+        if (confirmedGesture != stableGesture) {
+            stableGesture = confirmedGesture
+        }
+        lastAnalyzedGesture = gesture
 
-        if (gesture == HandGesture.FIST) isFistConfirmed = true
+        if (confirmedGesture == HandGesture.FIST) isFistConfirmed = true
 
-        if (isFistConfirmed && gesture == HandGesture.OPEN_PALM) {
+        if (isFistConfirmed && confirmedGesture == HandGesture.OPEN_PALM) {
             isFistConfirmed = false
+
+            // Жёсткое ограничение: не выходим за пределы повторов
+            if (repsInSet >= currentExercise.repsPerSet) {
+                AppLogger.log("REP", "Ignored: max reps reached ($repsInSet/${currentExercise.repsPerSet})")
+                return
+            }
+
             repsInSet++
             updateUi()
 
             AppLogger.log(
                 "REP",
-                "exercise=$currentExerciseId, set=$currentSet, rep=$repsInSet, gesture=$gesture"
+                "exercise=$currentExerciseId, set=$currentSet, rep=$repsInSet, gesture=$confirmedGesture"
             )
 
             TtsManager.speak("$repsInSet")
@@ -313,7 +389,7 @@ class SessionActivity : AppCompatActivity() {
                 }
             }
         }
-        lastGesture = gesture
+        lastGesture = confirmedGesture
     }
 
     private fun startRest() {
@@ -321,10 +397,8 @@ class SessionActivity : AppCompatActivity() {
         statusText.text = "Отдых"
         restTimerText.visibility = android.view.View.VISIBLE
 
-        // Сбрасываем жест и подтверждение "сведено", чтобы после отдыха
-        // повтор засчитывался только при новом цикле "свели -> развели".
-        isFistConfirmed = false
-        lastGesture = HandGesture.NONE
+        isResting = true
+        resetGestureState()
 
         AppLogger.log("REST", "Rest started: exercise=$currentExerciseId, set=$currentSet, restSec=$restSec")
         TtsManager.speak("Подход завершен. Отдых $restSec секунд.")
@@ -337,18 +411,14 @@ class SessionActivity : AppCompatActivity() {
                 timeLeft--
             }
             restTimerText.visibility = android.view.View.GONE
-            // После отдыха пользователь должен снова свести пальцы,
-            // прежде чем засчитается следующий повтор.
-            isFistConfirmed = false
-            lastGesture = HandGesture.NONE
+            isResting = false
+            resetGestureState()
             statusText.text = "Продолжаем!"
             TtsManager.speak("Продолжаем выполнение.")
         }
     }
 
     private fun finishCurrentExercise() {
-        // Защита от двойного вызова (из-за гонки при вызове из processResult
-        // и корутина).
         if (isProcessingTransition) return
         isProcessingTransition = true
 
@@ -371,7 +441,6 @@ class SessionActivity : AppCompatActivity() {
         }
 
         TtsManager.speak("Упражнение ${currentExercise.name} выполнено.")
-
         updateCircles(completedId = currentExerciseId)
 
         lifecycleScope.launch {
@@ -383,8 +452,7 @@ class SessionActivity : AppCompatActivity() {
                 currentExerciseId = pendingIds.first()
                 currentSet = 1
                 repsInSet = 0
-                isFistConfirmed = false
-                lastGesture = HandGesture.NONE
+                resetGestureState()
 
                 AppLogger.log("SESSION", "Next exercise: $currentExerciseId, pending=$pendingIds")
 
@@ -392,12 +460,10 @@ class SessionActivity : AppCompatActivity() {
                 updateUi()
                 TtsManager.speak(exerciseAnnouncement())
 
-                // Переход завершён — можно снова считать повторы.
                 isProcessingTransition = false
             } else {
                 AppLogger.log("SESSION", "All exercises completed")
                 Toast.makeText(this@SessionActivity, "Все упражнения выполнены!", Toast.LENGTH_LONG).show()
-                // isProcessingTransition оставляем true — активити закрывается.
                 finish()
             }
         }
@@ -423,7 +489,10 @@ class SessionActivity : AppCompatActivity() {
 
     private fun updateUi() {
         targetText.text = currentExercise.name
-        progressText.text = "Подход $currentSet/${currentExercise.targetSets} · Повтор $repsInSet/${currentExercise.repsPerSet}"
+        // Жёсткое ограничение отображения: не показываем больше, чем задано
+        val shownSet = currentSet.coerceAtMost(currentExercise.targetSets)
+        val shownRep = repsInSet.coerceAtMost(currentExercise.repsPerSet)
+        progressText.text = "Подход $shownSet/${currentExercise.targetSets} · Повтор $shownRep/${currentExercise.repsPerSet}"
     }
 
     override fun onDestroy() {
