@@ -5,10 +5,7 @@ import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult
 import kotlin.math.hypot
 
 enum class HandGesture {
-    NONE,
-    FIST,
-    OPEN_PALM,
-    UNKNOWN
+    NONE, FIST, OPEN_PALM, UNKNOWN
 }
 
 object GestureAnalyzer {
@@ -20,16 +17,9 @@ object GestureAnalyzer {
 
     fun analyze(hand: List<NormalizedLandmark>): HandGesture {
         if (hand.size < 21) return HandGesture.NONE
-
-        val isIndexExtended = isFingerExtended(hand[8], hand[5], hand[0])
-        val isMiddleExtended = isFingerExtended(hand[12], hand[9], hand[0])
-        val isRingExtended = isFingerExtended(hand[16], hand[13], hand[0])
-        val isPinkyExtended = isFingerExtended(hand[20], hand[17], hand[0])
-
-        val extendedCount = listOf(
-            isIndexExtended, isMiddleExtended, isRingExtended, isPinkyExtended
-        ).count { it }
-
+        val extendedCount = listOf(8, 12, 16, 20).count { tipIdx ->
+            isFingerExtended(hand[tipIdx], hand[tipIdx - 3], hand[0])
+        }
         return when {
             extendedCount == 4 -> HandGesture.OPEN_PALM
             extendedCount == 0 -> HandGesture.FIST
@@ -37,27 +27,16 @@ object GestureAnalyzer {
         }
     }
 
-    /**
-     * "Веер" (ex2) с гистерезисом.
-     * @param previous предыдущий жест (для гистерезиса на границе порога).
-     */
-    fun analyzeFan(
-        hand: List<NormalizedLandmark>,
-        previous: HandGesture = HandGesture.UNKNOWN
-    ): HandGesture {
+    /** "Веер" (ex2) */
+    fun analyzeFan(hand: List<NormalizedLandmark>, previous: HandGesture = HandGesture.UNKNOWN): HandGesture {
         if (hand.size < 21) return HandGesture.NONE
-
         val totalSpread = dist(hand[8], hand[12]) + dist(hand[12], hand[16]) + dist(hand[16], hand[20])
         val palmLength = dist(hand[0], hand[9])
         if (palmLength < 0.01f) return HandGesture.UNKNOWN
-
         val spreadRatio = totalSpread / palmLength
+        if (!isFingerExtended(hand[8], hand[5], hand[0]) || !isFingerExtended(hand[20], hand[17], hand[0]))
+            return HandGesture.UNKNOWN
 
-        val isIndexExtended = isFingerExtended(hand[8], hand[5], hand[0])
-        val isPinkyExtended = isFingerExtended(hand[20], hand[17], hand[0])
-        if (!isIndexExtended || !isPinkyExtended) return HandGesture.UNKNOWN
-
-        // Гистерезис: держим предыдущее состояние в "серой зоне"
         return when {
             spreadRatio > 1.80f -> HandGesture.OPEN_PALM
             spreadRatio < 1.60f -> HandGesture.FIST
@@ -69,45 +48,25 @@ object GestureAnalyzer {
         }
     }
 
-    /**
-     * "Когти" (ex3).
-     * ratio = dist(tip, wrist) / dist(mcp, wrist) для каждого пальца:
-     *   ratio < 0.9f   -> кулак
-     *   ratio < 1.6f   -> "коготь"
-     *   ratio >= 1.6f  -> прямой палец
-     *
-     * straightCount >= 3                          -> OPEN_PALM (ладонь прямая)
-     * clawCount >= 2 && straightCount == 0        -> FIST      ("когти")
-     * fistCount >= 3                              -> UNKNOWN   (кулак, не когти)
-     * иначе                                       -> UNKNOWN
-     */
+    /** "Когти" (ex3) */
     fun analyzeClaw(hand: List<NormalizedLandmark>): HandGesture {
         if (hand.size < 21) return HandGesture.NONE
-
-        val fingers = listOf(
-            Triple(8, 5, 0),
-            Triple(12, 9, 0),
-            Triple(16, 13, 0),
-            Triple(20, 17, 0)
+        // Явное указание типа Triple устраняет ошибки компиляции
+        val fingers: List<Triple<Int, Int, Int>> = listOf(
+            Triple(8, 5, 0), Triple(12, 9, 0), Triple(16, 13, 0), Triple(20, 17, 0)
         )
-
-        var straightCount = 0
-        var clawCount = 0
-        var fistCount = 0
-
+        var straightCount = 0; var clawCount = 0; var fistCount = 0
         for ((tipIdx, mcpIdx, wristIdx) in fingers) {
             val tipDist = dist(hand[tipIdx], hand[wristIdx])
             val mcpDist = dist(hand[mcpIdx], hand[wristIdx])
             if (mcpDist < 0.001f) continue
             val ratio = tipDist / mcpDist
-
             when {
                 ratio < 0.9f -> fistCount++
                 ratio < 1.6f -> clawCount++
                 else -> straightCount++
             }
         }
-
         return when {
             straightCount >= 3 -> HandGesture.OPEN_PALM
             clawCount >= 2 && straightCount == 0 -> HandGesture.FIST
@@ -116,16 +75,53 @@ object GestureAnalyzer {
         }
     }
 
-    private fun isFingerExtended(
-        tip: NormalizedLandmark,
-        mcp: NormalizedLandmark,
-        wrist: NormalizedLandmark
-    ): Boolean {
+    /** "Подушечки" (ex4) */
+    fun isThumbTouching(hand: List<NormalizedLandmark>): Boolean {
+        if (hand.size < 21) return false
+        val thumbTip = hand[4]
+        val fingerTips = listOf(8, 12, 16, 20)
+        val touchThreshold = 0.05f
+        for (tipIdx in fingerTips) {
+            if (dist(thumbTip, hand[tipIdx]) < touchThreshold) return true
+        }
+        return false
+    }
+
+    /** "Стена" (ex5) */
+    fun analyzeWall(hand: List<NormalizedLandmark>): HandGesture {
+        if (hand.size < 21) return HandGesture.NONE
+        // Явное указание типа Pair устраняет ошибки компиляции
+        val fingers: List<Pair<Int, Int>> = listOf(
+            Pair(8, 5), Pair(12, 9), Pair(16, 13), Pair(20, 17)
+        )
+        var liftedCount = 0
+        for ((tipIdx, mcpIdx) in fingers) {
+            if (hand[tipIdx].y() < hand[mcpIdx].y()) liftedCount++
+        }
+        return when {
+            liftedCount >= 3 -> HandGesture.OPEN_PALM
+            liftedCount <= 1 -> HandGesture.FIST
+            else -> HandGesture.UNKNOWN
+        }
+    }
+
+    /** "Пианино" (ex6) */
+    fun analyzePiano(hand: List<NormalizedLandmark>): HandGesture {
+        if (hand.size < 21) return HandGesture.NONE
+        val wristY = hand[0].y()
+        var activeFingers = 0
+        for (tipIdx in listOf(8, 12, 16, 20)) {
+            if (hand[tipIdx].y() < wristY - 0.05f) activeFingers++
+        }
+        return if (activeFingers > 0) HandGesture.OPEN_PALM else HandGesture.FIST
+    }
+
+    private fun isFingerExtended(tip: NormalizedLandmark, mcp: NormalizedLandmark, wrist: NormalizedLandmark): Boolean {
         val distTip = hypot(tip.x() - wrist.x(), tip.y() - wrist.y())
         val distMcp = hypot(mcp.x() - wrist.x(), mcp.y() - wrist.y())
         return distTip > distMcp * 1.2f
     }
 
-    private fun dist(a: NormalizedLandmark, b: NormalizedLandmark): Float =
+    fun dist(a: NormalizedLandmark, b: NormalizedLandmark): Float =
         hypot(a.x() - b.x(), a.y() - b.y())
 }
