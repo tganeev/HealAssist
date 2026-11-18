@@ -51,7 +51,6 @@ object GestureAnalyzer {
     /** "Когти" (ex3) */
     fun analyzeClaw(hand: List<NormalizedLandmark>): HandGesture {
         if (hand.size < 21) return HandGesture.NONE
-        // Явное указание типа Triple устраняет ошибки компиляции
         val fingers: List<Triple<Int, Int, Int>> = listOf(
             Triple(8, 5, 0), Triple(12, 9, 0), Triple(16, 13, 0), Triple(20, 17, 0)
         )
@@ -90,7 +89,6 @@ object GestureAnalyzer {
     /** "Стена" (ex5) */
     fun analyzeWall(hand: List<NormalizedLandmark>): HandGesture {
         if (hand.size < 21) return HandGesture.NONE
-        // Явное указание типа Pair устраняет ошибки компиляции
         val fingers: List<Pair<Int, Int>> = listOf(
             Pair(8, 5), Pair(12, 9), Pair(16, 13), Pair(20, 17)
         )
@@ -106,14 +104,35 @@ object GestureAnalyzer {
     }
 
     /** "Пианино" (ex6) */
-    fun analyzePiano(hand: List<NormalizedLandmark>): HandGesture {
-        if (hand.size < 21) return HandGesture.NONE
+    fun analyzePiano(hand: List<NormalizedLandmark>): Int {
+        if (hand.size < 21) return -1
+
         val wristY = hand[0].y()
-        var activeFingers = 0
-        for (tipIdx in listOf(8, 12, 16, 20)) {
-            if (hand[tipIdx].y() < wristY - 0.05f) activeFingers++
+        // Координаты кончиков пальцев и большого пальца
+        val tips = listOf(
+            8 to 0,   // Указательный
+            12 to 1,  // Средний
+            16 to 2,  // Безымянный
+            20 to 3,  // Мизинец
+            4 to 4    // Большой
+        )
+
+        var maxTipY = -1f
+        var touchingFingerIdx = -1
+
+        // Порог: палец должен быть ниже запястья минимум на 0.03 (3% высоты экрана)
+        val touchThreshold = 0.03f
+
+        for ((tipIdx, fingerIndex) in tips) {
+            val tipY = hand[tipIdx].y()
+            // Проверяем, что палец реально ниже запястья и является самым нижним
+            if (tipY > wristY + touchThreshold && tipY > maxTipY) {
+                maxTipY = tipY
+                touchingFingerIdx = fingerIndex
+            }
         }
-        return if (activeFingers > 0) HandGesture.OPEN_PALM else HandGesture.FIST
+
+        return touchingFingerIdx
     }
 
     private fun isFingerExtended(tip: NormalizedLandmark, mcp: NormalizedLandmark, wrist: NormalizedLandmark): Boolean {
@@ -122,6 +141,6 @@ object GestureAnalyzer {
         return distTip > distMcp * 1.2f
     }
 
-    fun dist(a: NormalizedLandmark, b: NormalizedLandmark): Float =
+    private fun dist(a: NormalizedLandmark, b: NormalizedLandmark): Float =
         hypot(a.x() - b.x(), a.y() - b.y())
 }

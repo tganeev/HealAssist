@@ -1,7 +1,6 @@
 package com.healassist.app.camera
 
 import android.content.Context
-import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.framework.image.MPImage
 import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.core.Delegate
@@ -15,8 +14,11 @@ class HandLandmarkerHelper(
     private val onResult: (HandLandmarkerResult, imageWidth: Int, imageHeight: Int) -> Unit,
     private val onError: (String) -> Unit,
 ) : AutoCloseable {
-
     private var handLandmarker: HandLandmarker? = null
+
+    // Флаг безопасности для предотвращения краша при onDestroy
+    @Volatile
+    private var isClosed = false
 
     init {
         handLandmarker = create(context, Delegate.GPU, modelFile)
@@ -49,11 +51,19 @@ class HandLandmarkerHelper(
         }
 
     fun detectAsync(image: MPImage, timestampMs: Long) {
-        handLandmarker?.detectAsync(image, timestampMs)
+        // Проверяем флаг перед отправкой пакета
+        if (!isClosed) {
+            try {
+                handLandmarker?.detectAsync(image, timestampMs)
+            } catch (e: IllegalStateException) {
+                // Игнорируем ошибку, если граф был закрыт во время отправки
+            }
+        }
     }
 
     override fun close() {
-        handLandmarker?.close()
+        isClosed = true // Сначала ставим флаг
+        handLandmarker?.close() // Потом закрываем нативный ресурс
         handLandmarker = null
     }
 }
