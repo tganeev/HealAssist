@@ -72,7 +72,6 @@ class SessionActivity : AppCompatActivity() {
     private var pendingIds = mutableListOf<String>()
 
     private var isFirstExerciseInSession = false
-    private var totalInSession = 0
 
     private var lastGesture = HandGesture.NONE
     private var isFistConfirmed = false
@@ -106,15 +105,13 @@ class SessionActivity : AppCompatActivity() {
 
         currentExerciseId = intent.getStringExtra(EXTRA_EXERCISE_ID) ?: "ex1"
         pendingIds = intent.getStringArrayListExtra(EXTRA_PENDING_LIST) ?: mutableListOf(currentExerciseId)
-        totalInSession = pendingIds.size
         isFirstExerciseInSession = intent.getBooleanExtra(EXTRA_IS_FIRST, false)
 
         updateCircles()
         updateUi()
 
         // Фраза про телефон — ТОЛЬКО если первое упражнение (ex1) ещё не выполнено
-        // и присутствует в текущей сессии. Флаг EXTRA_IS_FIRST дополнительно
-        // подстраховывает на случай, если активити запустят не из CalendarScreen.
+        // и присутствует в текущей сессии.
         val shouldAnnouncePhoneSetup =
             isFirstExerciseInSession && pendingIds.contains(EXERCISE_FIRST_ID)
 
@@ -136,15 +133,21 @@ class SessionActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Фраза-объявление упражнения: "Упражнение первое. <название>. <инструкция>".
+     * Номер упражнения ФИКСИРОВАН по позиции в allExercises:
+     *   ex1 -> первое, ex2 -> второе, ex3 -> третье и т.д.
+     * Это не зависит от того, с какого упражнения начата текущая сессия.
+     */
     private fun exerciseAnnouncement(): String {
-        val ordinal = sessionOrdinal()
+        val ordinal = ordinalWord(ordinalNumberForCurrentExercise())
         return "Упражнение $ordinal. ${currentExercise.name}. ${currentExercise.instruction}"
     }
 
-    private fun sessionOrdinal(): String {
-        val done = totalInSession - pendingIds.size
-        val number = done + 1
-        return ordinalWord(number)
+    /** Порядковый номер текущего упражнения в allExercises (1-based). */
+    private fun ordinalNumberForCurrentExercise(): Int {
+        val idx = allExercises.indexOfFirst { it.id == currentExerciseId }
+        return if (idx >= 0) idx + 1 else 1
     }
 
     private fun ordinalWord(n: Int): String = when (n) {
