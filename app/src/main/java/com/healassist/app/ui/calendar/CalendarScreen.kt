@@ -30,6 +30,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.healassist.app.data.ScheduledStatus
 import com.healassist.app.ui.SessionActivity
 import com.healassist.app.ui.logs.LogsScreen
+import com.healassist.app.utils.AppLogger
 import java.time.DayOfWeek
 import java.time.LocalDate
 import java.time.format.TextStyle
@@ -59,13 +60,19 @@ fun CalendarScreen(vm: CalendarViewModel = viewModel()) {
     val weekDays = remember(weekStart) { (0L..6L).map { weekStart.plusDays(it) } }
 
     val lifecycleOwner = LocalLifecycleOwner.current
+
+    // Обновляем данные при каждом возврате на экран
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) vm.refresh()
+            if (event == Lifecycle.Event.ON_RESUME) {
+                AppLogger.log("CALENDAR", "ON_RESUME triggered, refreshing data")
+                vm.refresh()
+            }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
+
 
     if (showLogs) {
         LogsScreen(onBack = { showLogs = false })

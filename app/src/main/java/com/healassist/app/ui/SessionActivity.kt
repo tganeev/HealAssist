@@ -32,6 +32,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import kotlinx.coroutines.withContext
 
 class SessionActivity : AppCompatActivity() {
     companion object {
@@ -55,7 +56,7 @@ class SessionActivity : AppCompatActivity() {
     private val cameraExecutor: ExecutorService = Executors.newSingleThreadExecutor()
 
     private val allExercises = listOf(
-        ExerciseModel("ex1", "Сжатие кулака", "Съожмите руку в кулак, задержите на пару секунд и полностью разожмите.", 2, 5, 10, ExerciseType.FINGER),
+        ExerciseModel("ex1", "Сжатие кулака", "Съожмите руку в кулак, задержъите на пару секунд и полностью разожмите.", 2, 5, 10, ExerciseType.FINGER),
         ExerciseModel("ex2", "Веер", "Раскройте ладонь и максимально широко разведите все пальцы в стороны, затем сведите их вместе.", 2, 5, 10, ExerciseType.FINGER),
         ExerciseModel("ex3", "Когти", "Согните пальцы в средних суставах, имитируя кошачьи когти, не сжимая кулак. Затем выпрямите.", 2, 5, 10, ExerciseType.FINGER),
         ExerciseModel("ex4", "Подушечки", "Большим пальцем поочередно касайтесь подушечек остальных пальцев.", 2, 5, 10, ExerciseType.FINGER),
@@ -473,28 +474,54 @@ class SessionActivity : AppCompatActivity() {
         }
     }
 
+    // Замените метод finishCurrentExercise() на этот:
+
     private fun finishCurrentExercise() {
         if (isProcessingTransition) return
         isProcessingTransition = true
-        AppLogger.log("FINISH", "Exercise completed: $currentExerciseId")
+        AppLogger.log(
+            "FINISH",
+            "Exercise completed: $currentExerciseId (sets=${currentExercise.targetSets}, reps/set=${currentExercise.repsPerSet})"
+        )
 
-        lifecycleScope.launch(Dispatchers.IO) {
-            val db = PoseCounterDatabase.get(this@SessionActivity)
-            val todayUtc = java.time.LocalDate.now().atStartOfDay(java.time.ZoneOffset.UTC).toInstant().toEpochMilli()
-            val schedules = db.scheduledExerciseDao().getForDate(todayUtc)
-            val schedule = schedules.find { it.exerciseId == currentExerciseId }
-            if (schedule != null) {
-                db.scheduledExerciseDao().markStatus(schedule.id, ScheduledStatus.DONE, null)
-                AppLogger.log("DB", "Marked exercise as DONE: $currentExerciseId")
-            }
-        }
-
-        TtsManager.speak("Упражнение ${currentExercise.name} выполнено.")
-        updateCircles(completedId = currentExerciseId)
-
+        // ВАЖНО: всё в одном корутине с последовательным выполнением
         lifecycleScope.launch {
-            delay(3000L)
+            // 1. Сначала сохраняем статус в БД и ЖДЕМ завершения
+            var saved = false
+            withContext(Dispatchers.IO) {
+                try {
+                    val db = PoseCounterDatabase.get(this@SessionActivity)
+                    val todayUtc = java.time.LocalDate.now()
+                        .atStartOfDay(java.time.ZoneOffset.UTC)
+                        .toInstant().toEpochMilli()
+                    val schedules = db.scheduledExerciseDao().getForDate(todayUtc)
+                    val schedule = schedules.find { it.exerciseId == currentExerciseId }
+                    if (schedule != null) {
+                        db.scheduledExerciseDao().markStatus(
+                            schedule.id,
+                            ScheduledStatus.DONE,
+                            null
+                        )
+                        AppLogger.log("DB", "Marked exercise as DONE: $currentExerciseId")
+                        saved = true
+                    } else {
+                        AppLogger.log("DB", "No schedule found for $currentExerciseId on today")
+                    }
+                } catch (e: Exception) {
+                    AppLogger.log("DB", "Error saving status: ${e.message}")
+                }
+            }
+
+            // 2. Озвучиваем и обновляем UI
+            TtsManager.speak("Упражнение ${currentExercise.name} выполнено.")
+            updateCircles(completedId = currentExerciseId)
+
+            // 3. Ждем завершения речи
+            delay(2500L)
+
+            // 4. Переходим к следующему упражнению или завершаем
             pendingIds.remove(currentExerciseId)
+
             if (pendingIds.isNotEmpty()) {
                 currentExerciseId = pendingIds.first()
                 currentSet = 1
@@ -502,14 +529,23 @@ class SessionActivity : AppCompatActivity() {
                 pianoCurrentStep = 0
                 pianoRepCount = 0
                 resetGestureState()
-                AppLogger.log("SESSION", "Next exercise: $currentExerciseId")
+                AppLogger.log("SESSION", "Next exercise: $currentExerciseId, pending=$pendingIds, saved=$saved")
                 updateCircles()
                 updateUi()
                 TtsManager.speak(exerciseAnnouncement())
                 isProcessingTransition = false
             } else {
-                AppLogger.log("SESSION", "All exercises completed")
-                Toast.makeText(this@SessionActivity, "Все упражнения выполнены!", Toast.LENGTH_LONG).show()
+                // ВСЕ УПРАЖНЕНИЯ ВЫПОЛНЕНЫ
+                AppLogger.log("SESSION", "All exercises completed, saved=$saved")
+                TtsManager.speak("Поздравляем! Утренний комплекс упражнений полностью выполнен.")
+                Toast.makeText(
+                    this@SessionActivity,
+                    "Все упражнения выполнены!",
+                    Toast.LENGTH_LONG
+                ).show()
+
+                // Ждем, чтобы пользователь услышал сообщение
+                delay(4000L)
                 finish()
             }
         }
