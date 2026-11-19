@@ -55,7 +55,7 @@ class SessionActivity : AppCompatActivity() {
     private val cameraExecutor: ExecutorService = Executors.newSingleThreadExecutor()
 
     private val allExercises = listOf(
-        ExerciseModel("ex1", "Сжатие кулака", "Сожмите руку в кулак, задержите на пару секунд и полностью разожмите.", 2, 5, 10, ExerciseType.FINGER),
+        ExerciseModel("ex1", "Сжатие кулака", "Съожмите руку в кулак, задержите на пару секунд и полностью разожмите.", 2, 5, 10, ExerciseType.FINGER),
         ExerciseModel("ex2", "Веер", "Раскройте ладонь и максимально широко разведите все пальцы в стороны, затем сведите их вместе.", 2, 5, 10, ExerciseType.FINGER),
         ExerciseModel("ex3", "Когти", "Согните пальцы в средних суставах, имитируя кошачьи когти, не сжимая кулак. Затем выпрямите.", 2, 5, 10, ExerciseType.FINGER),
         ExerciseModel("ex4", "Подушечки", "Большим пальцем поочередно касайтесь подушечек остальных пальцев.", 2, 5, 10, ExerciseType.FINGER),
@@ -260,13 +260,16 @@ class SessionActivity : AppCompatActivity() {
     private fun processResult(result: HandLandmarkerResult, imageWidth: Int, imageHeight: Int) {
         val now = System.currentTimeMillis()
 
-        // Базовый лог наличия руки
+        // Базовый лог наличия руки (раз в секунду)
         if (now - lastGestureLogTime > 1000) {
             lastGestureLogTime = now
             if (result.landmarks().isEmpty()) {
                 AppLogger.log("HAND_DETECT", "No hand in frame (exercise=$currentExerciseId)")
             } else {
-                AppLogger.log("HAND_DETECT", "Hand detected, landmarks=${result.landmarks()[0].size}, exercise=$currentExerciseId")
+                AppLogger.log(
+                    "HAND_DETECT",
+                    "Hand detected, landmarks=${result.landmarks()[0].size}, exercise=$currentExerciseId"
+                )
             }
         }
 
@@ -278,9 +281,8 @@ class SessionActivity : AppCompatActivity() {
 
         val hand = result.landmarks()[0]
 
-        // --- РАСШИРЕННОЕ ДИАГНОСТИЧЕСКОЕ ЛОГИРОВАНИЕ ---
-        // Логируем каждые ~200мс для отладки координат без перегрузки лога
-        if (now % 200 < 20) {
+        // --- РАСШИРЕННОЕ ДИАГНОСТИЧЕСКОЕ ЛОГИРОВАНИЕ ДЛЯ ПИАНИНО ---
+        if (currentExerciseId == "ex6" && now % 200 < 20) {
             val wristY = hand[0].y()
             val indexTipY = hand[8].y()
             val middleTipY = hand[12].y()
@@ -289,7 +291,7 @@ class SessionActivity : AppCompatActivity() {
             val thumbTipY = hand[4].y()
 
             AppLogger.log(
-                "DIAG_$currentExerciseId",
+                "DIAG_ex6",
                 "WristY=${String.format("%.3f", wristY)} | Tips: I=${String.format("%.3f", indexTipY)} M=${String.format("%.3f", middleTipY)} R=${String.format("%.3f", ringTipY)} P=${String.format("%.3f", pinkyTipY)} Th=${String.format("%.3f", thumbTipY)}"
             )
         }
@@ -298,34 +300,38 @@ class SessionActivity : AppCompatActivity() {
         val gesture: HandGesture
         val statusMessage: String
 
-        if (currentExerciseId == "ex6") {
-            // --- ЛОГИКА УПРАЖНЕНИЯ "ПИАНИНО" ---
+        // --- СПЕЦИАЛЬНАЯ ЛОГИКА ДЛЯ УПРАЖНЕНИЙ ---
+        if (currentExerciseId == EXERCISE_CLAW_ID) {
+            // "Когти": OPEN_PALM = выпрямленные пальцы, FIST = согнуты под ~90°
+            gesture = GestureAnalyzer.analyzeClaw(hand)
+            statusMessage = when (gesture) {
+                HandGesture.OPEN_PALM -> "Ладонь выпрямлена"
+                HandGesture.FIST -> "Когти!"
+                HandGesture.UNKNOWN -> "Промежуточное положение"
+                else -> "Рука не найдена"
+            }
+        } else if (currentExerciseId == "ex6") {
+            // "Пианино": последовательное касание пальцев
             val touchedFinger = GestureAnalyzer.analyzePiano(hand)
 
             if (touchedFinger == -1) {
-                // Ни один палец не касается стола
                 gesture = HandGesture.NONE
                 statusMessage = if (pianoCurrentStep == 0)
                     "Исходное положение: Поднимите ладонь над столом на высоту мизинца"
                 else
                     "Жду касания ${pianoFingerNames[pianoCurrentStep]} пальцем..."
             } else if (touchedFinger == pianoCurrentStep) {
-                // Правильное касание текущего шага
                 gesture = HandGesture.OPEN_PALM
 
-                // Обработка успешного касания
                 if (!isProcessingTransition && !isResting) {
-                    // Озвучиваем имя пальца
                     TtsManager.speak(pianoFingerNames[pianoCurrentStep], flushQueue = false)
 
                     pianoCurrentStep++
                     if (pianoCurrentStep >= 5) {
-                        // Завершен полный цикл всех 5 пальцев
                         pianoCurrentStep = 0
                         pianoRepCount++
 
                         if (pianoRepCount >= currentExercise.repsPerSet) {
-                            // Упражнение завершено
                             if (currentSet >= currentExercise.targetSets) {
                                 finishCurrentExercise()
                             } else {
@@ -342,7 +348,6 @@ class SessionActivity : AppCompatActivity() {
                 }
                 statusMessage = "Касание засчитано!"
             } else {
-                // Касание не того пальца
                 gesture = HandGesture.UNKNOWN
                 statusMessage = "Коснитесь стола ${pianoFingerNames[pianoCurrentStep]} пальцем"
             }
@@ -350,7 +355,6 @@ class SessionActivity : AppCompatActivity() {
             // --- СТАНДАРТНАЯ ЛОГИКА ДЛЯ ОСТАЛЬНЫХ УПРАЖНЕНИЙ ---
             gesture = when (currentExerciseId) {
                 EXERCISE_FAN_ID -> GestureAnalyzer.analyzeFan(hand, lastAnalyzedGesture)
-                EXERCISE_CLAW_ID -> GestureAnalyzer.analyzeClaw(hand)
                 "ex4" -> if (GestureAnalyzer.isThumbTouching(hand)) HandGesture.OPEN_PALM else HandGesture.FIST
                 "ex5" -> GestureAnalyzer.analyzeWall(hand)
                 else -> GestureAnalyzer.analyze(hand)
@@ -360,58 +364,90 @@ class SessionActivity : AppCompatActivity() {
                 HandGesture.NONE -> "Рука не найдена"
                 HandGesture.OPEN_PALM -> when (currentExerciseId) {
                     EXERCISE_FAN_ID -> "Пальцы разведены"
-                    EXERCISE_CLAW_ID -> "Ладонь выпрямлена"
                     "ex4" -> "Касание!"
                     "ex5" -> "Пальцы подняты"
                     else -> "Ладонь открыта"
                 }
                 HandGesture.FIST -> when (currentExerciseId) {
                     EXERCISE_FAN_ID -> "Пальцы сведены"
-                    EXERCISE_CLAW_ID -> "Когти"
                     "ex4" -> "Разведите пальцы"
                     "ex5" -> "Пальцы прижаты"
                     else -> "Кулак сжат"
                 }
                 HandGesture.UNKNOWN -> "Промежуточное положение"
             }
-
-            // Стандартная логика подсчета повторений (FIST -> OPEN_PALM)
-            if (!isProcessingTransition && !isResting) {
-                if (gesture != pendingGesture) {
-                    pendingGesture = gesture
-                    pendingSinceMs = now
-                }
-                val confirmedGesture = if (now - pendingSinceMs >= GESTURE_STABLE_MS) gesture else stableGesture
-                if (confirmedGesture != stableGesture) stableGesture = confirmedGesture
-                lastAnalyzedGesture = gesture
-
-                if (confirmedGesture == HandGesture.FIST) isFistConfirmed = true
-
-                if (isFistConfirmed && confirmedGesture == HandGesture.OPEN_PALM) {
-                    isFistConfirmed = false
-                    if (repsInSet < currentExercise.repsPerSet) {
-                        repsInSet++
-                        updateUi()
-                        AppLogger.log("REP", "exercise=$currentExerciseId, set=$currentSet, rep=$repsInSet")
-                        TtsManager.speak("$repsInSet")
-
-                        if (repsInSet >= currentExercise.repsPerSet) {
-                            if (currentSet >= currentExercise.targetSets) {
-                                finishCurrentExercise()
-                            } else {
-                                currentSet++
-                                repsInSet = 0
-                                updateUi()
-                                startRest()
-                            }
-                        }
-                    }
-                }
-                lastGesture = confirmedGesture
-            }
         }
 
         statusText.text = "Статус: $statusMessage"
+
+        // Не считаем повторы во время перехода или отдыха
+        if (isProcessingTransition || isResting) return
+
+        // --- ДЕБАУНС: жест должен удерживаться GESTURE_STABLE_MS ---
+        if (gesture != pendingGesture) {
+            pendingGesture = gesture
+            pendingSinceMs = now
+        }
+        val confirmedGesture = if (now - pendingSinceMs >= GESTURE_STABLE_MS) gesture else stableGesture
+        if (confirmedGesture != stableGesture) {
+            stableGesture = confirmedGesture
+        }
+        lastAnalyzedGesture = gesture
+
+        // --- ЛОГИКА ПОДСЧЕТА ПОВТОРЕНИЙ ---
+        if (currentExerciseId == EXERCISE_CLAW_ID) {
+            // Для "Когтей": повтор засчитывается при переходе OPEN_PALM -> FIST
+            if (confirmedGesture == HandGesture.OPEN_PALM) {
+                isFistConfirmed = false // Разрешаем следующее срабатывание
+            }
+
+            if (!isFistConfirmed && confirmedGesture == HandGesture.FIST) {
+                isFistConfirmed = true
+                if (repsInSet < currentExercise.repsPerSet) {
+                    repsInSet++
+                    updateUi()
+                    AppLogger.log("REP", "exercise=$currentExerciseId, set=$currentSet, rep=$repsInSet, gesture=CLAW_REACHED")
+                    TtsManager.speak("$repsInSet")
+
+                    if (repsInSet >= currentExercise.repsPerSet) {
+                        if (currentSet >= currentExercise.targetSets) {
+                            finishCurrentExercise()
+                        } else {
+                            currentSet++
+                            repsInSet = 0
+                            updateUi()
+                            startRest()
+                        }
+                    }
+                }
+            }
+        } else {
+            // Стандартная логика: повтор засчитывается при переходе FIST -> OPEN_PALM
+            if (confirmedGesture == HandGesture.FIST) isFistConfirmed = true
+
+            if (isFistConfirmed && confirmedGesture == HandGesture.OPEN_PALM) {
+                isFistConfirmed = false
+                if (repsInSet < currentExercise.repsPerSet) {
+                    repsInSet++
+                    updateUi()
+                    AppLogger.log("REP", "exercise=$currentExerciseId, set=$currentSet, rep=$repsInSet")
+                    TtsManager.speak("$repsInSet")
+
+                    if (repsInSet >= currentExercise.repsPerSet) {
+                        if (currentSet >= currentExercise.targetSets) {
+                            finishCurrentExercise()
+                        } else {
+                            currentSet++
+                            repsInSet = 0
+                            updateUi()
+                            startRest()
+                        }
+                    }
+                }
+            }
+        }
+
+        lastGesture = confirmedGesture
     }
 
     private fun startRest() {

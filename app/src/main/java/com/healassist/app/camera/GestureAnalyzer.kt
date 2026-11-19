@@ -51,25 +51,26 @@ object GestureAnalyzer {
     /** "Когти" (ex3) */
     fun analyzeClaw(hand: List<NormalizedLandmark>): HandGesture {
         if (hand.size < 21) return HandGesture.NONE
-        val fingers: List<Triple<Int, Int, Int>> = listOf(
-            Triple(8, 5, 0), Triple(12, 9, 0), Triple(16, 13, 0), Triple(20, 17, 0)
+
+        val joints = listOf(
+            Triple(5, 6, 8), Triple(9, 10, 12),
+            Triple(13, 14, 16), Triple(17, 18, 20)
         )
-        var straightCount = 0; var clawCount = 0; var fistCount = 0
-        for ((tipIdx, mcpIdx, wristIdx) in fingers) {
-            val tipDist = dist(hand[tipIdx], hand[wristIdx])
-            val mcpDist = dist(hand[mcpIdx], hand[wristIdx])
-            if (mcpDist < 0.001f) continue
-            val ratio = tipDist / mcpDist
+
+        var straightCount = 0
+        var clawCount = 0
+
+        for ((mcpIdx, pipIdx, tipIdx) in joints) {
+            val ang = angle(hand[mcpIdx], hand[pipIdx], hand[tipIdx])
             when {
-                ratio < 0.9f -> fistCount++
-                ratio < 1.6f -> clawCount++
-                else -> straightCount++
+                ang > 150f -> straightCount++
+                ang >= 75f && ang <= 105f -> clawCount++
             }
         }
+
         return when {
             straightCount >= 3 -> HandGesture.OPEN_PALM
-            clawCount >= 2 && straightCount == 0 -> HandGesture.FIST
-            fistCount >= 3 -> HandGesture.UNKNOWN
+            clawCount >= 2 -> HandGesture.FIST // Используем FIST как триггер для счетчика
             else -> HandGesture.UNKNOWN
         }
     }
@@ -103,13 +104,19 @@ object GestureAnalyzer {
         }
     }
 
-    /** "Пианино" (ex6) */
+    /**
+     * Анализ упражнения "Пианино".
+     * Возвращает индекс пальца (0-4), который касается стола.
+     * Индексы: 0=Указательный, 1=Средний, 2=Безымянный, 3=Мизинец, 4=Большой
+     */
     fun analyzePiano(hand: List<NormalizedLandmark>): Int {
         if (hand.size < 21) return -1
 
         val wristY = hand[0].y()
+
         // Координаты кончиков пальцев и большого пальца
-        val tips = listOf(
+        // Порядок важен для приоритета проверки
+        val fingers = listOf(
             8 to 0,   // Указательный
             12 to 1,  // Средний
             16 to 2,  // Безымянный
@@ -117,22 +124,27 @@ object GestureAnalyzer {
             4 to 4    // Большой
         )
 
+        // Порог снижен до 0.025 для лучшей чувствительности при плоском положении руки
+        val touchThreshold = 0.025f
+
+        var bestFingerIdx = -1
         var maxTipY = -1f
-        var touchingFingerIdx = -1
 
-        // Порог: палец должен быть ниже запястья минимум на 0.03 (3% высоты экрана)
-        val touchThreshold = 0.03f
-
-        for ((tipIdx, fingerIndex) in tips) {
+        for ((tipIdx, fingerIndex) in fingers) {
             val tipY = hand[tipIdx].y()
-            // Проверяем, что палец реально ниже запястья и является самым нижним
-            if (tipY > wristY + touchThreshold && tipY > maxTipY) {
-                maxTipY = tipY
-                touchingFingerIdx = fingerIndex
+
+            // Палец должен быть ниже запястья на величину порога
+            if (tipY > wristY + touchThreshold) {
+                // Если этот палец ниже всех найденных ранее ИЛИ
+                // если он является целевым для текущего шага (приоритет)
+                if (tipY > maxTipY || bestFingerIdx == -1) {
+                    maxTipY = tipY
+                    bestFingerIdx = fingerIndex
+                }
             }
         }
 
-        return touchingFingerIdx
+        return bestFingerIdx
     }
 
     private fun isFingerExtended(tip: NormalizedLandmark, mcp: NormalizedLandmark, wrist: NormalizedLandmark): Boolean {
@@ -143,4 +155,48 @@ object GestureAnalyzer {
 
     private fun dist(a: NormalizedLandmark, b: NormalizedLandmark): Float =
         hypot(a.x() - b.x(), a.y() - b.y())
+
+    private fun angle(a: NormalizedLandmark, b: NormalizedLandmark, c: NormalizedLandmark): Float {
+        val abX = a.x() - b.x(); val abY = a.y() - b.y()
+        val cbX = c.x() - b.x(); val cbY = c.y() - b.y()
+
+        val dot = abX * cbX + abY * cbY
+        val magAB = hypot(abX, abY)
+        val magCB = hypot(cbX, cbY)
+
+        if (magAB < 0.001f || magCB < 0.001f) return 0f
+
+        val cosAngle = (dot / (magAB * magCB)).coerceIn(-1f, 1f)
+        return Math.toDegrees(Math.acos(cosAngle.toDouble())).toFloat()
+    }
+
+    /**
+     * Проверяет, достигнута ли форма "когтя" (угол ~90° в PIP суставе).
+     * Возвращает true, если хотя бы 2 пальца согнуты под углом 75-105°.
+     */
+    fun isClawReached(hand: List<NormalizedLandmark>): Boolean {
+        if (hand.size < 21) return false
+
+        // Индексы: MCP, PIP, TIP для каждого пальца
+        val joints = listOf(
+            Triple(5, 6, 8),   // Указательный
+            Triple(9, 10, 12), // Средний
+            Triple(13, 14, 16),// Безымянный
+            Triple(17, 18, 20) // Мизинец
+        )
+
+        var clawCount = 0
+        for ((mcpIdx, pipIdx, tipIdx) in joints) {
+            val ang = angle(hand[mcpIdx], hand[pipIdx], hand[tipIdx])
+            // Диапазон 75-105 градусов допускает небольшую погрешность трекинга
+            if (ang >= 75f && ang <= 105f) {
+                clawCount++
+            }
+        }
+
+        // Считаем "когтем", если минимум 2 пальца согнуты правильно
+        return clawCount >= 2
+    }
+
+
 }
