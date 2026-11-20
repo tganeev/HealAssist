@@ -6,18 +6,23 @@ import android.graphics.Bitmap
 import android.graphics.Matrix
 import android.os.Bundle
 import android.os.SystemClock
+import android.view.View
 import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
-import androidx.camera.core.*
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageProxy
+import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult
+import com.healassist.app.R
 import com.healassist.app.TtsManager
 import com.healassist.app.camera.GestureAnalyzer
 import com.healassist.app.camera.HandGesture
@@ -30,18 +35,31 @@ import com.healassist.app.utils.AppLogger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import kotlinx.coroutines.withContext
 
 class SessionActivity : AppCompatActivity() {
     companion object {
         const val EXTRA_EXERCISE_ID = "exercise_id"
         const val EXTRA_PENDING_LIST = "pending_list"
         const val EXTRA_IS_FIRST = "is_first"
+        private const val EXERCISE_FIRST_ID = "ex1"
         private const val EXERCISE_FAN_ID = "ex2"
         private const val EXERCISE_CLAW_ID = "ex3"
+        private const val EXERCISE_THUMB_ID = "ex4"
+        private const val EXERCISE_WALL_ID = "ex5"
+        private const val EXERCISE_PIANO_ID = "ex6"
         private const val GESTURE_STABLE_MS = 300L
+
+        /** Сколько кадров подряд ожидаемый палец должен быть поднят (ex5). */
+        private const val WALL_STABLE_FRAMES_REQUIRED = 6
+
+        /** Минимальный lift для "поднят" (ex5). Уменьшено, чтобы не тянуться высоко. */
+        private const val WALL_LIFT_THRESHOLD = 0.008f
+
+        /** Допуск для проверки "самый поднятый" (ex5). */
+        private const val WALL_LIFT_TOLERANCE = 0.02f
     }
 
     private lateinit var viewFinder: PreviewView
@@ -56,11 +74,11 @@ class SessionActivity : AppCompatActivity() {
     private val cameraExecutor: ExecutorService = Executors.newSingleThreadExecutor()
 
     private val allExercises = listOf(
-        ExerciseModel("ex1", "Сжатие кулака", "Съожмите руку в кулак, задержъите на пару секунд и полностью разожмите.", 2, 5, 10, ExerciseType.FINGER),
+        ExerciseModel("ex1", "Сжатие кулака", "Сожьмите руку в кулак, задержиъте на пару секунд и полностью разожмите.", 2, 5, 10, ExerciseType.FINGER),
         ExerciseModel("ex2", "Веер", "Раскройте ладонь и максимально широко разведите все пальцы в стороны, затем сведите их вместе.", 2, 5, 10, ExerciseType.FINGER),
         ExerciseModel("ex3", "Когти", "Согните пальцы в средних суставах, имитируя кошачьи когти, не сжимая кулак. Затем выпрямите.", 2, 5, 10, ExerciseType.FINGER),
         ExerciseModel("ex4", "Подушечки", "Большим пальцем поочередно касайтесь подушечек остальных пальцев.", 2, 5, 10, ExerciseType.FINGER),
-        ExerciseModel("ex5", "Стена", "Ладонь на столе. По очереди отрывайте каждый палец от поверхности.", 2, 5, 10, ExerciseType.FINGER),
+        ExerciseModel("ex5", "Стена", "Ладонь на столе. По очереди поднимайте каждый палец: указательный, средний, безымянный, мизинец, большой.", 2, 5, 10, ExerciseType.FINGER),
         ExerciseModel("ex6", "Пианино", "Постучите подушечками пальцев по столу, имитируя игру на пианино.", 2, 5, 10, ExerciseType.FINGER)
     )
 
@@ -69,7 +87,6 @@ class SessionActivity : AppCompatActivity() {
     private var pendingIds = mutableListOf<String>()
     private var isFirstExerciseInSession = false
 
-    // Состояния для стандартных упражнений
     private var lastGesture = HandGesture.NONE
     private var isFistConfirmed = false
     private var currentSet = 1
@@ -80,16 +97,20 @@ class SessionActivity : AppCompatActivity() {
     private var isResting = false
     private var lastGestureLogTime = 0L
 
-    // Дебаунс состояния жеста
     private var stableGesture: HandGesture = HandGesture.NONE
     private var pendingGesture: HandGesture = HandGesture.NONE
     private var pendingSinceMs = 0L
     private var lastAnalyzedGesture: HandGesture = HandGesture.UNKNOWN
 
-    // Состояние для упражнения "Пианино"
-    private var pianoCurrentStep = 0 // 0-Указательный, 1-Средний, 2-Безымянный, 3-Мизинец, 4-Большой
+    private var pianoCurrentStep = 0
     private val pianoFingerNames = listOf("указательным", "средним", "безымянным", "мизинцем", "большим")
-    private var pianoRepCount = 0 // Счетчик полных циклов (повторений) для Пианино
+    private var pianoRepCount = 0
+
+    private var wallCurrentStep = 0
+    private val wallFingerNames = listOf("указательный", "средний", "безымянный", "мизинец", "большой")
+    private var wallRepCount = 0
+    private var wallStableFrames = 0
+    private var wallStarted = false
 
     private val requestPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -98,14 +119,14 @@ class SessionActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContentView(com.healassist.app.R.layout.activity_session)
+        setContentView(R.layout.activity_session)
 
-        viewFinder = findViewById(com.healassist.app.R.id.sessionViewFinder)
-        targetText = findViewById(com.healassist.app.R.id.sessionTarget)
-        progressText = findViewById(com.healassist.app.R.id.sessionProgress)
-        statusText = findViewById(com.healassist.app.R.id.sessionStatus)
-        exitButton = findViewById(com.healassist.app.R.id.sessionPauseButton)
-        restTimerText = findViewById(com.healassist.app.R.id.restTimerText)
+        viewFinder = findViewById(R.id.sessionViewFinder)
+        targetText = findViewById(R.id.sessionTarget)
+        progressText = findViewById(R.id.sessionProgress)
+        statusText = findViewById(R.id.sessionStatus)
+        exitButton = findViewById(R.id.sessionPauseButton)
+        restTimerText = findViewById(R.id.restTimerText)
 
         setupCircleClickListeners()
         exitButton.text = "Выход"
@@ -122,7 +143,7 @@ class SessionActivity : AppCompatActivity() {
         updateCircles()
         updateUi()
 
-        val shouldAnnouncePhoneSetup = isFirstExerciseInSession && pendingIds.contains("ex1")
+        val shouldAnnouncePhoneSetup = isFirstExerciseInSession && pendingIds.contains(EXERCISE_FIRST_ID)
         if (shouldAnnouncePhoneSetup) {
             TtsManager.speak("Поставьте телефон перед собой таким образом, чтобы в камеру вы видели свои руки.", flushQueue = true)
             TtsManager.speak(exerciseAnnouncement(), flushQueue = false)
@@ -143,8 +164,8 @@ class SessionActivity : AppCompatActivity() {
 
     private fun setupCircleClickListeners() {
         val circleIds = listOf<Int>(
-            com.healassist.app.R.id.circle1, com.healassist.app.R.id.circle2, com.healassist.app.R.id.circle3,
-            com.healassist.app.R.id.circle4, com.healassist.app.R.id.circle5, com.healassist.app.R.id.circle6
+            R.id.circle1, R.id.circle2, R.id.circle3,
+            R.id.circle4, R.id.circle5, R.id.circle6
         )
         for (i in allExercises.indices) {
             val circle = findViewById<TextView>(circleIds[i])
@@ -158,15 +179,23 @@ class SessionActivity : AppCompatActivity() {
         currentExerciseId = newExerciseId
         currentSet = 1
         repsInSet = 0
-        pianoCurrentStep = 0
-        pianoRepCount = 0
+        resetSequenceState()
         resetGestureState()
         isResting = false
-        restTimerText.visibility = android.view.View.GONE
+        restTimerText.visibility = View.GONE
         statusText.text = "Ожидание..."
         updateCircles()
         updateUi()
         TtsManager.speak(exerciseAnnouncement())
+    }
+
+    private fun resetSequenceState() {
+        pianoCurrentStep = 0
+        pianoRepCount = 0
+        wallCurrentStep = 0
+        wallRepCount = 0
+        wallStableFrames = 0
+        wallStarted = false
     }
 
     private fun exerciseAnnouncement(): String {
@@ -197,7 +226,7 @@ class SessionActivity : AppCompatActivity() {
                         runOnUiThread { statusText.text = "Ошибка: $msg" }
                     }
                 )
-                AppLogger.log("CAMERA", "HandLandmarkerHelper created")
+                AppLogger.log("CAMERA", "HandLandmarkerHelper created, model=hand_landmarker.task")
                 val future = ProcessCameraProvider.getInstance(this)
                 future.addListener({
                     cameraProvider = future.get()
@@ -256,21 +285,19 @@ class SessionActivity : AppCompatActivity() {
         isFistConfirmed = false
         lastGesture = HandGesture.NONE
         lastAnalyzedGesture = HandGesture.UNKNOWN
+        wallStableFrames = 0
     }
 
     private fun processResult(result: HandLandmarkerResult, imageWidth: Int, imageHeight: Int) {
+        if (isDestroyed) return
         val now = System.currentTimeMillis()
 
-        // Базовый лог наличия руки (раз в секунду)
         if (now - lastGestureLogTime > 1000) {
             lastGestureLogTime = now
             if (result.landmarks().isEmpty()) {
                 AppLogger.log("HAND_DETECT", "No hand in frame (exercise=$currentExerciseId)")
             } else {
-                AppLogger.log(
-                    "HAND_DETECT",
-                    "Hand detected, landmarks=${result.landmarks()[0].size}, exercise=$currentExerciseId"
-                )
+                AppLogger.log("HAND_DETECT", "Hand detected, landmarks=${result.landmarks()[0].size}, exercise=$currentExerciseId")
             }
         }
 
@@ -282,39 +309,93 @@ class SessionActivity : AppCompatActivity() {
 
         val hand = result.landmarks()[0]
 
-        // --- РАСШИРЕННОЕ ДИАГНОСТИЧЕСКОЕ ЛОГИРОВАНИЕ ДЛЯ ПИАНИНО ---
-        if (currentExerciseId == "ex6" && now % 200 < 20) {
-            val wristY = hand[0].y()
-            val indexTipY = hand[8].y()
-            val middleTipY = hand[12].y()
-            val ringTipY = hand[16].y()
-            val pinkyTipY = hand[20].y()
-            val thumbTipY = hand[4].y()
-
+        if (currentExerciseId == EXERCISE_PIANO_ID && now % 200 < 20) {
             AppLogger.log(
                 "DIAG_ex6",
-                "WristY=${String.format("%.3f", wristY)} | Tips: I=${String.format("%.3f", indexTipY)} M=${String.format("%.3f", middleTipY)} R=${String.format("%.3f", ringTipY)} P=${String.format("%.3f", pinkyTipY)} Th=${String.format("%.3f", thumbTipY)}"
+                "WristY=${String.format("%.3f", hand[0].y())} | Tips: I=${String.format("%.3f", hand[8].y())} M=${String.format("%.3f", hand[12].y())} R=${String.format("%.3f", hand[16].y())} P=${String.format("%.3f", hand[20].y())} Th=${String.format("%.3f", hand[4].y())}"
             )
         }
-        // -----------------------------------------------
+
+        // Диагностика для "Стены": lift = (mcp.y - tip.y) / palmSize
+        if (currentExerciseId == EXERCISE_WALL_ID && now % 200 < 20) {
+            val lifts = GestureAnalyzer.getFingerLifts(hand)
+            val names = listOf("I", "M", "R", "P", "Th")
+            val diag = lifts.mapIndexed { i, l -> "${names[i]}=${String.format("%.3f", l)}" }.joinToString(" ")
+            AppLogger.log("DIAG_ex5", "step=$wallCurrentStep frames=$wallStableFrames | $diag")
+        }
+
+        if (isProcessingTransition || isResting) {
+            statusText.text = if (isResting) "Статус: Отдых" else "Статус: Переход к следующему упражнению"
+            return
+        }
 
         val gesture: HandGesture
         val statusMessage: String
 
-        // --- СПЕЦИАЛЬНАЯ ЛОГИКА ДЛЯ УПРАЖНЕНИЙ ---
-        if (currentExerciseId == EXERCISE_CLAW_ID) {
-            // "Когти": OPEN_PALM = выпрямленные пальцы, FIST = согнуты под ~90°
-            gesture = GestureAnalyzer.analyzeClaw(hand)
-            statusMessage = when (gesture) {
-                HandGesture.OPEN_PALM -> "Ладонь выпрямлена"
-                HandGesture.FIST -> "Когти!"
-                HandGesture.UNKNOWN -> "Промежуточное положение"
-                else -> "Рука не найдена"
-            }
-        } else if (currentExerciseId == "ex6") {
-            // "Пианино": последовательное касание пальцев
-            val touchedFinger = GestureAnalyzer.analyzePiano(hand)
+        if (currentExerciseId == EXERCISE_WALL_ID) {
+            // --- ЛОГИКА УПРАЖНЕНИЯ "СТЕНА" ---
+            val lifts = GestureAnalyzer.getFingerLifts(hand)
+            val expectedIdx = wallCurrentStep
 
+            // Ожидаемый палец поднят: lift > 0.008 И он не ниже остальных (с допуском 0.03).
+            val expectedLifted = lifts[expectedIdx] > WALL_LIFT_THRESHOLD
+            val expectedIsMost = GestureAnalyzer.isExpectedMostLifted(
+                lifts, expectedIdx, WALL_LIFT_TOLERANCE
+            )
+            val isExpectedLifted = expectedLifted && expectedIsMost
+
+            if (!wallStarted) {
+                wallStarted = true
+                TtsManager.speak("Поднимите ${wallFingerNames[expectedIdx]}", flushQueue = false)
+                AppLogger.log("TTS", "Wall start prompt: ${wallFingerNames[expectedIdx]}")
+            }
+
+            if (isExpectedLifted) {
+                wallStableFrames++
+                if (wallStableFrames >= WALL_STABLE_FRAMES_REQUIRED) {
+                    wallStableFrames = 0
+                    gesture = HandGesture.OPEN_PALM
+                    val countedName = wallFingerNames[wallCurrentStep]
+                    AppLogger.log("REP", "exercise=ex5, set=$currentSet, cycle=$wallRepCount, step=$wallCurrentStep ($countedName)")
+                    // FIX: вместо названия пальца — "Отлично".
+                    TtsManager.speak("Отлично", flushQueue = false)
+
+                    wallCurrentStep++
+
+                    if (wallCurrentStep >= 5) {
+                        wallCurrentStep = 0
+                        wallRepCount++
+                        if (wallRepCount >= currentExercise.repsPerSet) {
+                            if (currentSet >= currentExercise.targetSets) {
+                                updateUi()
+                                finishCurrentExercise()
+                            } else {
+                                currentSet++
+                                wallRepCount = 0
+                                wallStarted = false
+                                updateUi()
+                                startRest()
+                            }
+                        } else {
+                            updateUi()
+                            TtsManager.speak("Следующее повторение. Поднимите ${wallFingerNames[wallCurrentStep]}", flushQueue = false)
+                        }
+                    } else {
+                        TtsManager.speak("Поднимите ${wallFingerNames[wallCurrentStep]}", flushQueue = false)
+                    }
+                    statusMessage = "Палец поднят!"
+                } else {
+                    gesture = HandGesture.UNKNOWN
+                    statusMessage = "Держите ${wallFingerNames[wallCurrentStep]}..."
+                }
+            } else {
+                wallStableFrames = 0
+                gesture = HandGesture.NONE
+                statusMessage = "Поднимите ${wallFingerNames[wallCurrentStep]}"
+            }
+        } else if (currentExerciseId == EXERCISE_PIANO_ID) {
+            // --- ЛОГИКА УПРАЖНЕНИЯ "ПИАНИНО" ---
+            val touchedFinger = GestureAnalyzer.analyzePiano(hand)
             if (touchedFinger == -1) {
                 gesture = HandGesture.NONE
                 statusMessage = if (pianoCurrentStep == 0)
@@ -323,28 +404,25 @@ class SessionActivity : AppCompatActivity() {
                     "Жду касания ${pianoFingerNames[pianoCurrentStep]} пальцем..."
             } else if (touchedFinger == pianoCurrentStep) {
                 gesture = HandGesture.OPEN_PALM
-
-                if (!isProcessingTransition && !isResting) {
-                    TtsManager.speak(pianoFingerNames[pianoCurrentStep], flushQueue = false)
-
-                    pianoCurrentStep++
-                    if (pianoCurrentStep >= 5) {
-                        pianoCurrentStep = 0
-                        pianoRepCount++
-
-                        if (pianoRepCount >= currentExercise.repsPerSet) {
-                            if (currentSet >= currentExercise.targetSets) {
-                                finishCurrentExercise()
-                            } else {
-                                currentSet++
-                                pianoRepCount = 0
-                                updateUi()
-                                startRest()
-                            }
-                        } else {
+                AppLogger.log("REP", "exercise=ex6, set=$currentSet, cycle=$pianoRepCount, step=$pianoCurrentStep")
+                TtsManager.speak(pianoFingerNames[pianoCurrentStep], flushQueue = false)
+                pianoCurrentStep++
+                if (pianoCurrentStep >= 5) {
+                    pianoCurrentStep = 0
+                    pianoRepCount++
+                    if (pianoRepCount >= currentExercise.repsPerSet) {
+                        if (currentSet >= currentExercise.targetSets) {
                             updateUi()
-                            TtsManager.speak("Отлично! Следующее повторение.")
+                            finishCurrentExercise()
+                        } else {
+                            currentSet++
+                            pianoRepCount = 0
+                            updateUi()
+                            startRest()
                         }
+                    } else {
+                        updateUi()
+                        TtsManager.speak("Отлично! Следующее повторение.", flushQueue = false)
                     }
                 }
                 statusMessage = "Касание засчитано!"
@@ -353,11 +431,11 @@ class SessionActivity : AppCompatActivity() {
                 statusMessage = "Коснитесь стола ${pianoFingerNames[pianoCurrentStep]} пальцем"
             }
         } else {
-            // --- СТАНДАРТНАЯ ЛОГИКА ДЛЯ ОСТАЛЬНЫХ УПРАЖНЕНИЙ ---
+            // --- СТАНДАРТНАЯ ЛОГИКА ---
             gesture = when (currentExerciseId) {
                 EXERCISE_FAN_ID -> GestureAnalyzer.analyzeFan(hand, lastAnalyzedGesture)
-                "ex4" -> if (GestureAnalyzer.isThumbTouching(hand)) HandGesture.OPEN_PALM else HandGesture.FIST
-                "ex5" -> GestureAnalyzer.analyzeWall(hand)
+                EXERCISE_CLAW_ID -> GestureAnalyzer.analyzeClaw(hand)
+                EXERCISE_THUMB_ID -> if (GestureAnalyzer.isThumbTouching(hand)) HandGesture.OPEN_PALM else HandGesture.FIST
                 else -> GestureAnalyzer.analyze(hand)
             }
 
@@ -365,97 +443,82 @@ class SessionActivity : AppCompatActivity() {
                 HandGesture.NONE -> "Рука не найдена"
                 HandGesture.OPEN_PALM -> when (currentExerciseId) {
                     EXERCISE_FAN_ID -> "Пальцы разведены"
-                    "ex4" -> "Касание!"
-                    "ex5" -> "Пальцы подняты"
+                    EXERCISE_CLAW_ID -> "Ладонь выпрямлена"
+                    EXERCISE_THUMB_ID -> "Касание!"
                     else -> "Ладонь открыта"
                 }
                 HandGesture.FIST -> when (currentExerciseId) {
                     EXERCISE_FAN_ID -> "Пальцы сведены"
-                    "ex4" -> "Разведите пальцы"
-                    "ex5" -> "Пальцы прижаты"
+                    EXERCISE_CLAW_ID -> "Когти"
+                    EXERCISE_THUMB_ID -> "Разведите пальцы"
                     else -> "Кулак сжат"
                 }
                 HandGesture.UNKNOWN -> "Промежуточное положение"
             }
+
+            if (gesture != pendingGesture) {
+                pendingGesture = gesture
+                pendingSinceMs = now
+            }
+            val confirmedGesture = if (now - pendingSinceMs >= GESTURE_STABLE_MS) gesture else stableGesture
+            if (confirmedGesture != stableGesture) stableGesture = confirmedGesture
+            lastAnalyzedGesture = gesture
+
+            if (currentExerciseId == EXERCISE_CLAW_ID) {
+                if (confirmedGesture == HandGesture.OPEN_PALM) isFistConfirmed = false
+                if (!isFistConfirmed && confirmedGesture == HandGesture.FIST) {
+                    isFistConfirmed = true
+                    if (repsInSet < currentExercise.repsPerSet) {
+                        repsInSet++
+                        updateUi()
+                        AppLogger.log("REP", "exercise=$currentExerciseId, set=$currentSet, rep=$repsInSet, gesture=CLAW_REACHED")
+                        TtsManager.speak("$repsInSet")
+                        if (repsInSet >= currentExercise.repsPerSet) {
+                            if (currentSet >= currentExercise.targetSets) {
+                                finishCurrentExercise()
+                            } else {
+                                currentSet++
+                                repsInSet = 0
+                                updateUi()
+                                startRest()
+                            }
+                        }
+                    }
+                }
+            } else {
+                if (confirmedGesture == HandGesture.FIST) isFistConfirmed = true
+                if (isFistConfirmed && confirmedGesture == HandGesture.OPEN_PALM) {
+                    isFistConfirmed = false
+                    if (repsInSet < currentExercise.repsPerSet) {
+                        repsInSet++
+                        updateUi()
+                        AppLogger.log("REP", "exercise=$currentExerciseId, set=$currentSet, rep=$repsInSet")
+                        TtsManager.speak("$repsInSet")
+                        if (repsInSet >= currentExercise.repsPerSet) {
+                            if (currentSet >= currentExercise.targetSets) {
+                                finishCurrentExercise()
+                            } else {
+                                currentSet++
+                                repsInSet = 0
+                                updateUi()
+                                startRest()
+                            }
+                        }
+                    }
+                }
+            }
+            lastGesture = confirmedGesture
         }
 
         statusText.text = "Статус: $statusMessage"
-
-        // Не считаем повторы во время перехода или отдыха
-        if (isProcessingTransition || isResting) return
-
-        // --- ДЕБАУНС: жест должен удерживаться GESTURE_STABLE_MS ---
-        if (gesture != pendingGesture) {
-            pendingGesture = gesture
-            pendingSinceMs = now
-        }
-        val confirmedGesture = if (now - pendingSinceMs >= GESTURE_STABLE_MS) gesture else stableGesture
-        if (confirmedGesture != stableGesture) {
-            stableGesture = confirmedGesture
-        }
-        lastAnalyzedGesture = gesture
-
-        // --- ЛОГИКА ПОДСЧЕТА ПОВТОРЕНИЙ ---
-        if (currentExerciseId == EXERCISE_CLAW_ID) {
-            // Для "Когтей": повтор засчитывается при переходе OPEN_PALM -> FIST
-            if (confirmedGesture == HandGesture.OPEN_PALM) {
-                isFistConfirmed = false // Разрешаем следующее срабатывание
-            }
-
-            if (!isFistConfirmed && confirmedGesture == HandGesture.FIST) {
-                isFistConfirmed = true
-                if (repsInSet < currentExercise.repsPerSet) {
-                    repsInSet++
-                    updateUi()
-                    AppLogger.log("REP", "exercise=$currentExerciseId, set=$currentSet, rep=$repsInSet, gesture=CLAW_REACHED")
-                    TtsManager.speak("$repsInSet")
-
-                    if (repsInSet >= currentExercise.repsPerSet) {
-                        if (currentSet >= currentExercise.targetSets) {
-                            finishCurrentExercise()
-                        } else {
-                            currentSet++
-                            repsInSet = 0
-                            updateUi()
-                            startRest()
-                        }
-                    }
-                }
-            }
-        } else {
-            // Стандартная логика: повтор засчитывается при переходе FIST -> OPEN_PALM
-            if (confirmedGesture == HandGesture.FIST) isFistConfirmed = true
-
-            if (isFistConfirmed && confirmedGesture == HandGesture.OPEN_PALM) {
-                isFistConfirmed = false
-                if (repsInSet < currentExercise.repsPerSet) {
-                    repsInSet++
-                    updateUi()
-                    AppLogger.log("REP", "exercise=$currentExerciseId, set=$currentSet, rep=$repsInSet")
-                    TtsManager.speak("$repsInSet")
-
-                    if (repsInSet >= currentExercise.repsPerSet) {
-                        if (currentSet >= currentExercise.targetSets) {
-                            finishCurrentExercise()
-                        } else {
-                            currentSet++
-                            repsInSet = 0
-                            updateUi()
-                            startRest()
-                        }
-                    }
-                }
-            }
-        }
-
-        lastGesture = confirmedGesture
     }
 
     private fun startRest() {
         val restSec = currentExercise.restBetweenSetsSec
         statusText.text = "Отдых"
-        restTimerText.visibility = android.view.View.VISIBLE
+        restTimerText.visibility = View.VISIBLE
         isResting = true
+        wallStableFrames = 0
         resetGestureState()
         AppLogger.log("REST", "Rest started: exercise=$currentExerciseId, set=$currentSet, restSec=$restSec")
         TtsManager.speak("Подход завершен. Отдых $restSec секунд.")
@@ -466,44 +529,33 @@ class SessionActivity : AppCompatActivity() {
                 delay(1000L)
                 timeLeft--
             }
-            restTimerText.visibility = android.view.View.GONE
+            restTimerText.visibility = View.GONE
             isResting = false
+            wallStableFrames = 0
             resetGestureState()
             statusText.text = "Продолжаем!"
             TtsManager.speak("Продолжаем выполнение.")
+            if (currentExerciseId == EXERCISE_WALL_ID) {
+                wallStarted = false
+            }
         }
     }
-
-    // Замените метод finishCurrentExercise() на этот:
 
     private fun finishCurrentExercise() {
         if (isProcessingTransition) return
         isProcessingTransition = true
-        AppLogger.log(
-            "FINISH",
-            "Exercise completed: $currentExerciseId (sets=${currentExercise.targetSets}, reps/set=${currentExercise.repsPerSet})"
-        )
+        AppLogger.log("FINISH", "Exercise completed: $currentExerciseId")
 
-        // ВАЖНО: всё в одном корутине с последовательным выполнением
         lifecycleScope.launch {
-            // 1. Сначала сохраняем статус в БД и ЖДЕМ завершения
-            var saved = false
             withContext(Dispatchers.IO) {
                 try {
                     val db = PoseCounterDatabase.get(this@SessionActivity)
-                    val todayUtc = java.time.LocalDate.now()
-                        .atStartOfDay(java.time.ZoneOffset.UTC)
-                        .toInstant().toEpochMilli()
+                    val todayUtc = java.time.LocalDate.now().atStartOfDay(java.time.ZoneOffset.UTC).toInstant().toEpochMilli()
                     val schedules = db.scheduledExerciseDao().getForDate(todayUtc)
                     val schedule = schedules.find { it.exerciseId == currentExerciseId }
                     if (schedule != null) {
-                        db.scheduledExerciseDao().markStatus(
-                            schedule.id,
-                            ScheduledStatus.DONE,
-                            null
-                        )
+                        db.scheduledExerciseDao().markStatus(schedule.id, ScheduledStatus.DONE, null)
                         AppLogger.log("DB", "Marked exercise as DONE: $currentExerciseId")
-                        saved = true
                     } else {
                         AppLogger.log("DB", "No schedule found for $currentExerciseId on today")
                     }
@@ -512,39 +564,26 @@ class SessionActivity : AppCompatActivity() {
                 }
             }
 
-            // 2. Озвучиваем и обновляем UI
             TtsManager.speak("Упражнение ${currentExercise.name} выполнено.")
             updateCircles(completedId = currentExerciseId)
-
-            // 3. Ждем завершения речи
             delay(2500L)
 
-            // 4. Переходим к следующему упражнению или завершаем
             pendingIds.remove(currentExerciseId)
-
             if (pendingIds.isNotEmpty()) {
                 currentExerciseId = pendingIds.first()
                 currentSet = 1
                 repsInSet = 0
-                pianoCurrentStep = 0
-                pianoRepCount = 0
+                resetSequenceState()
                 resetGestureState()
-                AppLogger.log("SESSION", "Next exercise: $currentExerciseId, pending=$pendingIds, saved=$saved")
+                AppLogger.log("SESSION", "Next exercise: $currentExerciseId, pending=$pendingIds")
                 updateCircles()
                 updateUi()
                 TtsManager.speak(exerciseAnnouncement())
                 isProcessingTransition = false
             } else {
-                // ВСЕ УПРАЖНЕНИЯ ВЫПОЛНЕНЫ
-                AppLogger.log("SESSION", "All exercises completed, saved=$saved")
+                AppLogger.log("SESSION", "All exercises completed")
                 TtsManager.speak("Поздравляем! Утренний комплекс упражнений полностью выполнен.")
-                Toast.makeText(
-                    this@SessionActivity,
-                    "Все упражнения выполнены!",
-                    Toast.LENGTH_LONG
-                ).show()
-
-                // Ждем, чтобы пользователь услышал сообщение
+                Toast.makeText(this@SessionActivity, "Все упражнения выполнены!", Toast.LENGTH_LONG).show()
                 delay(4000L)
                 finish()
             }
@@ -553,16 +592,16 @@ class SessionActivity : AppCompatActivity() {
 
     private fun updateCircles(completedId: String? = null) {
         val circleIds = listOf<Int>(
-            com.healassist.app.R.id.circle1, com.healassist.app.R.id.circle2, com.healassist.app.R.id.circle3,
-            com.healassist.app.R.id.circle4, com.healassist.app.R.id.circle5, com.healassist.app.R.id.circle6
+            R.id.circle1, R.id.circle2, R.id.circle3,
+            R.id.circle4, R.id.circle5, R.id.circle6
         )
         for (i in allExercises.indices) {
             val exId = allExercises[i].id
             val circle = findViewById<TextView>(circleIds[i])
             when {
-                exId == currentExerciseId -> circle.setBackgroundResource(com.healassist.app.R.drawable.circle_active)
-                !pendingIds.contains(exId) -> circle.setBackgroundResource(com.healassist.app.R.drawable.circle_completed)
-                else -> circle.setBackgroundResource(com.healassist.app.R.drawable.circle_inactive)
+                exId == currentExerciseId -> circle.setBackgroundResource(R.drawable.circle_active)
+                !pendingIds.contains(exId) -> circle.setBackgroundResource(R.drawable.circle_completed)
+                else -> circle.setBackgroundResource(R.drawable.circle_inactive)
             }
         }
     }
@@ -570,8 +609,11 @@ class SessionActivity : AppCompatActivity() {
     private fun updateUi() {
         targetText.text = currentExercise.name
         val shownSet = currentSet.coerceAtMost(currentExercise.targetSets)
-        // Для Пианино показываем прогресс по полным циклам (pianoRepCount)
-        val shownRep = if (currentExerciseId == "ex6") pianoRepCount else repsInSet.coerceAtMost(currentExercise.repsPerSet)
+        val shownRep = when (currentExerciseId) {
+            EXERCISE_PIANO_ID -> pianoRepCount
+            EXERCISE_WALL_ID -> wallRepCount
+            else -> repsInSet.coerceAtMost(currentExercise.repsPerSet)
+        }
         progressText.text = "Подход $shownSet/${currentExercise.targetSets} · Повтор $shownRep/${currentExercise.repsPerSet}"
     }
 
