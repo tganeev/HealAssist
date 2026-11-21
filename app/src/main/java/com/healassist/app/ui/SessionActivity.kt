@@ -21,12 +21,15 @@ import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.google.mediapipe.framework.image.BitmapImageBuilder
+import com.google.mediapipe.tasks.components.containers.Landmark
+import com.google.mediapipe.tasks.components.containers.NormalizedLandmark
 import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult
 import com.healassist.app.R
 import com.healassist.app.TtsManager
 import com.healassist.app.camera.GestureAnalyzer
 import com.healassist.app.camera.HandGesture
 import com.healassist.app.camera.HandLandmarkerHelper
+import com.healassist.app.camera.OverlayView
 import com.healassist.app.data.ComplexType
 import com.healassist.app.data.ExerciseModel
 import com.healassist.app.data.ExerciseType
@@ -34,11 +37,14 @@ import com.healassist.app.data.PoseCounterDatabase
 import com.healassist.app.data.ScheduledStatus
 import com.healassist.app.utils.AppLogger
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import kotlin.math.abs
 
 class SessionActivity : AppCompatActivity() {
     companion object {
@@ -55,21 +61,29 @@ class SessionActivity : AppCompatActivity() {
         private const val GESTURE_STABLE_MS = 300L
 
         private const val WALL_STABLE_FRAMES_REQUIRED = 6
-
-        /** Порог для "обычных" пальцев (I, M, R, P) относительно медианы. */
-        private const val WALL_RELATIVE_LIFT_THRESHOLD = 0.03f
-
-        /** Порог для большого пальца — его raw изначально высокий. */
-        private const val WALL_THUMB_LIFT_THRESHOLD = 0.50f
-
-        /** Допуск для "самый поднятый" среди обычных пальцев. */
-        private const val WALL_LIFT_TOLERANCE = 0.05f
-
-        /** Остальные пальцы должны быть ниже этого уровня, чтобы засчитать. */
-        private const val WALL_DOWN_THRESHOLD = 0.10f
+        private const val WALL_CALIBRATION_FRAMES_REQUIRED = 18
+        private const val WALL_LIFT_DELTA_THRESHOLD = 0.04f
+        private const val WALL_THUMB_DELTA_THRESHOLD = 0.10f
+        private const val WALL_DOWN_DELTA_THRESHOLD = 0.03f
+        private const val WALL_THUMB_DOWN_DELTA_THRESHOLD = 0.12f
+        private const val WALL_RELEASE_DELTA_THRESHOLD = 0.02f
+        private const val WALL_THUMB_RELEASE_DELTA_THRESHOLD = 0.05f
+        private const val WALL_LIFT_TOLERANCE = 0.02f
+        private const val WALL_CALIBRATION_MAX_ORDINARY_LIFT = 0.15f
+        private const val WALL_CALIBRATION_MAX_ORDINARY_SPREAD = 0.15f
+        private const val WALL_PALM_SIZE_TOLERANCE = 0.25f
+        private const val WALL_MIN_COUNT_INTERVAL_MS = 300L
+        private const val WALL_ZONE_MIN_X = 0.05f
+        private const val WALL_ZONE_MAX_X = 0.95f
+        private const val WALL_ZONE_MIN_Y = 0.05f
+        private const val WALL_ZONE_MAX_Y = 1.00f
+        private const val WALL_TINT_RED = 0x33FF5252
+        private const val WALL_TINT_GREEN = 0x334CAF50
+        private const val WALL_TINT_NONE = 0x00000000
     }
 
     private lateinit var viewFinder: PreviewView
+    private lateinit var overlay: OverlayView
     private lateinit var targetText: TextView
     private lateinit var progressText: TextView
     private lateinit var statusText: TextView
@@ -103,6 +117,7 @@ class SessionActivity : AppCompatActivity() {
     private var isDestroyed = false
     private var isProcessingTransition = false
     private var isResting = false
+    private var restJob: Job? = null
     private var lastGestureLogTime = 0L
 
     private var stableGesture: HandGesture = HandGesture.NONE
@@ -114,11 +129,25 @@ class SessionActivity : AppCompatActivity() {
     private val pianoFingerNames = listOf("указательным", "средним", "безымянным", "мизинцем", "большим")
     private var pianoRepCount = 0
 
+    private data class WallCalibration(
+        val restLifts: FloatArray,
+        val palmSize: Float,
+        val useWorld: Boolean,
+    )
+
     private var wallCurrentStep = 0
     private val wallFingerNames = listOf("указательный", "средний", "безымянный", "мизинец", "большой")
     private var wallRepCount = 0
     private var wallStableFrames = 0
-    private var wallStarted = false
+    private var wallCalibration: WallCalibration? = null
+    private var wallCalibrating = false
+    private var wallCalibrationFrames = 0
+    private val wallCalibrationSamples = mutableListOf<FloatArray>()
+    private val wallCalibrationPalmSamples = mutableListOf<Float>()
+    private var wallSmoothedDeltas: FloatArray? = null
+    private var wallStepArmed = true
+    private var wallLastCountMs = 0L
+    private var wallInZone = true
 
     private val requestPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -130,6 +159,7 @@ class SessionActivity : AppCompatActivity() {
         setContentView(R.layout.activity_session)
 
         viewFinder = findViewById(R.id.sessionViewFinder)
+        overlay = findViewById(R.id.sessionOverlay)
         targetText = findViewById(R.id.sessionTarget)
         progressText = findViewById(R.id.sessionProgress)
         statusText = findViewById(R.id.sessionStatus)
@@ -167,6 +197,10 @@ class SessionActivity : AppCompatActivity() {
             AppLogger.log("TTS", "Exercise announcement queued: $currentExerciseId")
         }
 
+        if (currentExerciseId == EXERCISE_WALL_ID) {
+            beginWallCalibration()
+        }
+
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             startCamera()
         } else {
@@ -188,6 +222,8 @@ class SessionActivity : AppCompatActivity() {
 
     private fun switchToExercise(newExerciseId: String) {
         if (newExerciseId == currentExerciseId || isProcessingTransition) return
+        restJob?.cancel()
+        restJob = null
         AppLogger.log("SESSION", "Manual switch: $currentExerciseId -> $newExerciseId")
         currentExerciseId = newExerciseId
         currentSet = 1
@@ -200,6 +236,9 @@ class SessionActivity : AppCompatActivity() {
         updateCircles()
         updateUi()
         TtsManager.speak(exerciseAnnouncement())
+        if (currentExerciseId == EXERCISE_WALL_ID) {
+            beginWallCalibration()
+        }
     }
 
     private fun resetSequenceState() {
@@ -208,7 +247,16 @@ class SessionActivity : AppCompatActivity() {
         wallCurrentStep = 0
         wallRepCount = 0
         wallStableFrames = 0
-        wallStarted = false
+        wallCalibration = null
+        wallCalibrating = false
+        wallCalibrationFrames = 0
+        wallCalibrationSamples.clear()
+        wallCalibrationPalmSamples.clear()
+        wallSmoothedDeltas = null
+        wallStepArmed = true
+        wallLastCountMs = 0L
+        wallInZone = true
+        overlay.setCalibrationTint(WALL_TINT_NONE)
     }
 
     private fun exerciseAnnouncement(): String {
@@ -263,10 +311,12 @@ class SessionActivity : AppCompatActivity() {
         analysis.setAnalyzer(cameraExecutor, ::analyzeFrame)
         val selector = if (provider.hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA))
             CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
+        val isFrontCamera = selector == CameraSelector.DEFAULT_FRONT_CAMERA
+        overlay.mirrored = isFrontCamera
         try {
             provider.unbindAll()
             provider.bindToLifecycle(this, selector, preview, analysis)
-            AppLogger.log("CAMERA", "Camera bound: ${if (selector == CameraSelector.DEFAULT_FRONT_CAMERA) "FRONT" else "BACK"}")
+            AppLogger.log("CAMERA", "Camera bound: ${if (isFrontCamera) "FRONT" else "BACK"}")
         } catch (e: Exception) {
             AppLogger.log("CAMERA", "Camera bind failed: ${e.message}")
             Toast.makeText(this, "Ошибка камеры: ${e.message}", Toast.LENGTH_LONG).show()
@@ -316,11 +366,15 @@ class SessionActivity : AppCompatActivity() {
 
         if (result.landmarks().isEmpty()) {
             statusText.text = "Статус: Рука не найдена"
+            if (currentExerciseId == EXERCISE_WALL_ID && wallCalibrating) {
+                overlay.setCalibrationTint(WALL_TINT_RED)
+            }
             lastGesture = HandGesture.NONE
             return
         }
 
         val hand = result.landmarks()[0]
+        val world = result.worldLandmarks().firstOrNull()
 
         if (currentExerciseId == EXERCISE_PIANO_ID && now % 200 < 20) {
             AppLogger.log(
@@ -329,16 +383,30 @@ class SessionActivity : AppCompatActivity() {
             )
         }
 
-        // Диагностика для "Стены"
         if (currentExerciseId == EXERCISE_WALL_ID && now % 200 < 20) {
             val raw = GestureAnalyzer.getFingerLifts(hand)
-            val rel = GestureAnalyzer.getRelativeLifts4(hand)
-            val names = listOf("I", "M", "R", "P", "Th")
-            val diag = names.indices.joinToString(" ") { i ->
-                "${names[i]}=${String.format("%.2f", raw[i])}/${String.format("%.2f", rel[i])}"
+            val worldLifts = world?.takeIf { it.size >= 21 }?.let {
+                GestureAnalyzer.getFingerLiftsWorld(it)
             }
-            val others = GestureAnalyzer.othersAreDown(rel, wallCurrentStep, WALL_DOWN_THRESHOLD)
-            AppLogger.log("DIAG_ex5", "step=$wallCurrentStep frames=$wallStableFrames othersDown=$others | $diag")
+            val names = listOf("I", "M", "R", "P", "Th")
+            val normDiag = names.indices.joinToString(" ") { i ->
+                "${names[i]}=${String.format(Locale.US, "%.2f", raw[i])}"
+            }
+            val worldDiag = worldLifts?.let { lifts ->
+                names.indices.joinToString(" ") { i ->
+                    "${names[i]}=${String.format(Locale.US, "%.2f", lifts[i])}"
+                }
+            } ?: "n/a"
+            val centerX = (hand[0].x() + hand[9].x()) / 2f
+            val centerY = (hand[0].y() + hand[9].y()) / 2f
+            AppLogger.log(
+                "DIAG_ex5",
+                "step=$wallCurrentStep frames=$wallStableFrames calib=$wallCalibrating " +
+                    "cal=${wallCalibration != null} inZone=$wallInZone " +
+                    "center=${String.format(Locale.US, "%.2f,%.2f", centerX, centerY)} " +
+                    "palm=${String.format(Locale.US, "%.3f", GestureAnalyzer.getPalmSize(hand))} | " +
+                    "norm=$normDiag | world=$worldDiag"
+            )
         }
 
         if (isProcessingTransition || isResting) {
@@ -350,33 +418,138 @@ class SessionActivity : AppCompatActivity() {
         val statusMessage: String
 
         if (currentExerciseId == EXERCISE_WALL_ID) {
-            // --- ЛОГИКА УПРАЖНЕНИЯ "СТЕНА" ---
-            val relLifts = GestureAnalyzer.getRelativeLifts4(hand)
+            val inZone = isHandInWallZone(hand)
+            wallInZone = inZone
+            if (!inZone) {
+                wallStableFrames = 0
+                wallStepArmed = false
+                wallSmoothedDeltas = null
+                wallCalibrationFrames = 0
+                wallCalibrationSamples.clear()
+                wallCalibrationPalmSamples.clear()
+                statusText.text = "Статус: Разместите руку на столе"
+                if (wallCalibrating) overlay.setCalibrationTint(WALL_TINT_RED)
+                return
+            }
+
+            if (wallCalibrating) {
+                val useWorld = world != null && world.size >= 21
+                val lifts = wallLiftsFor(hand, world, useWorld)
+                val palmSize = wallPalmSizeFor(hand, world, useWorld)
+                val ordinary = floatArrayOf(lifts[0], lifts[1], lifts[2], lifts[3])
+                val maxOrdinary = ordinary.maxOrNull() ?: 0f
+                val minOrdinary = ordinary.minOrNull() ?: 0f
+                val flat = maxOrdinary < WALL_CALIBRATION_MAX_ORDINARY_LIFT &&
+                    (maxOrdinary - minOrdinary) < WALL_CALIBRATION_MAX_ORDINARY_SPREAD
+
+                if (!flat) {
+                    wallCalibrationFrames = 0
+                    wallCalibrationSamples.clear()
+                    wallCalibrationPalmSamples.clear()
+                    statusText.text = "Статус: Разместите руку на столе"
+                    overlay.setCalibrationTint(WALL_TINT_RED)
+                    return
+                }
+
+                wallCalibrationSamples.add(lifts.copyOf())
+                wallCalibrationPalmSamples.add(palmSize)
+                wallCalibrationFrames++
+                overlay.setCalibrationTint(WALL_TINT_GREEN)
+                statusText.text = "Статус: Держите ладонь ровно... " +
+                    "${wallCalibrationFrames.coerceAtMost(WALL_CALIBRATION_FRAMES_REQUIRED)}/" +
+                    WALL_CALIBRATION_FRAMES_REQUIRED
+
+                if (wallCalibrationFrames >= WALL_CALIBRATION_FRAMES_REQUIRED) {
+                    val restLifts = averageLifts(wallCalibrationSamples)
+                    val restPalmSize = wallCalibrationPalmSamples.average().toFloat()
+                    wallCalibration = WallCalibration(restLifts, restPalmSize, useWorld)
+                    wallCalibrating = false
+                    wallCalibrationFrames = 0
+                    wallCalibrationSamples.clear()
+                    wallCalibrationPalmSamples.clear()
+                    wallSmoothedDeltas = null
+                    wallStepArmed = true
+                    wallStableFrames = 0
+                    overlay.setCalibrationTint(WALL_TINT_NONE)
+                    statusText.text = "Статус: Калибровка завершена. Поднимите ${wallFingerNames[wallCurrentStep]}"
+                    TtsManager.speak(
+                        "Калибровка завершена. Поднимите ${wallFingerNames[wallCurrentStep]}.",
+                        flushQueue = false,
+                    )
+                    AppLogger.log(
+                        "WALL",
+                        "Calibration complete: useWorld=$useWorld " +
+                            "palm=${String.format(Locale.US, "%.3f", restPalmSize)} " +
+                            "rest=${restLifts.joinToString { String.format(Locale.US, "%.2f", it) }}"
+                    )
+                }
+                return
+            }
+
+            val calibration = wallCalibration
+            if (calibration == null) {
+                beginWallCalibration()
+                return
+            }
+            if (calibration.useWorld && (world == null || world.size < 21)) {
+                wallStableFrames = 0
+                wallStepArmed = false
+                wallSmoothedDeltas = null
+                statusText.text = "Статус: Рука не найдена"
+                return
+            }
+
+            val lifts = wallLiftsFor(hand, world, calibration.useWorld)
+            val palmSize = wallPalmSizeFor(hand, world, calibration.useWorld)
+            if (calibration.palmSize > 0f &&
+                abs(palmSize - calibration.palmSize) / calibration.palmSize > WALL_PALM_SIZE_TOLERANCE
+            ) {
+                wallStableFrames = 0
+                wallStepArmed = false
+                wallSmoothedDeltas = null
+                statusText.text = "Статус: Держите руку на том же расстоянии"
+                return
+            }
+
+            val delta = FloatArray(5) { i -> lifts[i] - calibration.restLifts[i] }
+            val smoothed = smoothWallDeltas(delta)
             val expectedIdx = wallCurrentStep
-
-            val expectedLifted = if (expectedIdx == 4) {
-                relLifts[4] > WALL_THUMB_LIFT_THRESHOLD
+            val expectedThreshold = if (expectedIdx == 4) {
+                WALL_THUMB_DELTA_THRESHOLD
             } else {
-                relLifts[expectedIdx] > WALL_RELATIVE_LIFT_THRESHOLD
+                WALL_LIFT_DELTA_THRESHOLD
             }
-            val expectedIsMost = GestureAnalyzer.isExpectedMostLifted4(
-                relLifts, expectedIdx, WALL_LIFT_TOLERANCE
-            )
-            val othersDown = GestureAnalyzer.othersAreDown(
-                relLifts, expectedIdx, WALL_DOWN_THRESHOLD
-            )
-            val isExpectedLifted = expectedLifted && expectedIsMost && othersDown
+            val releaseThreshold = if (expectedIdx == 4) {
+                WALL_THUMB_RELEASE_DELTA_THRESHOLD
+            } else {
+                WALL_RELEASE_DELTA_THRESHOLD
+            }
 
-            if (!wallStarted) {
-                wallStarted = true
-                TtsManager.speak("Поднимите ${wallFingerNames[expectedIdx]}", flushQueue = false)
-                AppLogger.log("TTS", "Wall start prompt: ${wallFingerNames[expectedIdx]}")
+            if (smoothed[expectedIdx] < releaseThreshold) {
+                wallStepArmed = true
             }
+
+            val expectedLifted = smoothed[expectedIdx] > expectedThreshold
+            val expectedIsMost = GestureAnalyzer.isExpectedMostLifted4(
+                smoothed, expectedIdx, WALL_LIFT_TOLERANCE
+            )
+            val othersDown = GestureAnalyzer.othersAreDownDelta(
+                smoothed,
+                expectedIdx,
+                WALL_DOWN_DELTA_THRESHOLD,
+                WALL_THUMB_DOWN_DELTA_THRESHOLD,
+            )
+            val canCount = wallStepArmed &&
+                now - wallLastCountMs >= WALL_MIN_COUNT_INTERVAL_MS
+            val isExpectedLifted = canCount && expectedLifted && expectedIsMost && othersDown
 
             if (isExpectedLifted) {
                 wallStableFrames++
                 if (wallStableFrames >= WALL_STABLE_FRAMES_REQUIRED) {
                     wallStableFrames = 0
+                    wallStepArmed = false
+                    wallLastCountMs = now
+                    wallSmoothedDeltas = null
                     gesture = HandGesture.OPEN_PALM
                     val countedName = wallFingerNames[wallCurrentStep]
                     AppLogger.log("REP", "exercise=ex5, set=$currentSet, cycle=$wallRepCount, step=$wallCurrentStep ($countedName)")
@@ -394,7 +567,6 @@ class SessionActivity : AppCompatActivity() {
                             } else {
                                 currentSet++
                                 wallRepCount = 0
-                                wallStarted = false
                                 updateUi()
                                 startRest()
                             }
@@ -535,16 +707,100 @@ class SessionActivity : AppCompatActivity() {
         statusText.text = "Статус: $statusMessage"
     }
 
+    private fun beginWallCalibration() {
+        if (currentExerciseId != EXERCISE_WALL_ID || wallCalibrating) return
+        wallCalibration = null
+        wallCalibrating = true
+        wallCalibrationFrames = 0
+        wallCalibrationSamples.clear()
+        wallCalibrationPalmSamples.clear()
+        wallSmoothedDeltas = null
+        wallStepArmed = true
+        wallStableFrames = 0
+        wallLastCountMs = 0L
+        overlay.setCalibrationTint(WALL_TINT_RED)
+        statusText.text = "Статус: Разместите руку на столе"
+        TtsManager.speak("Разместите руку на столе так, чтобы загорелась зелёная подсветка.", flushQueue = false)
+        AppLogger.log("WALL", "Calibration started: exercise=$currentExerciseId, set=$currentSet")
+    }
+
+    private fun isHandInWallZone(hand: List<NormalizedLandmark>): Boolean {
+        if (hand.size < 21) return false
+        val centerX = (hand[0].x() + hand[9].x()) / 2f
+        val centerY = (hand[0].y() + hand[9].y()) / 2f
+        return centerX in WALL_ZONE_MIN_X..WALL_ZONE_MAX_X &&
+            centerY in WALL_ZONE_MIN_Y..WALL_ZONE_MAX_Y
+    }
+
+    private fun wallLiftsFor(
+        hand: List<NormalizedLandmark>,
+        world: List<Landmark>?,
+        useWorld: Boolean,
+    ): FloatArray =
+        if (useWorld && world != null && world.size >= 21) {
+            GestureAnalyzer.getFingerLiftsWorld(world)
+        } else {
+            GestureAnalyzer.getFingerLifts(hand)
+        }
+
+    private fun wallPalmSizeFor(
+        hand: List<NormalizedLandmark>,
+        world: List<Landmark>?,
+        useWorld: Boolean,
+    ): Float =
+        if (useWorld && world != null && world.size >= 21) {
+            GestureAnalyzer.getPalmSizeWorld(world)
+        } else {
+            GestureAnalyzer.getPalmSize(hand)
+        }
+
+    private fun smoothWallDeltas(delta: FloatArray): FloatArray {
+        val previous = wallSmoothedDeltas
+        if (previous == null) {
+            wallSmoothedDeltas = delta.copyOf()
+            return delta
+        }
+        val smoothed = FloatArray(delta.size) { i ->
+            previous[i] * 0.6f + delta[i] * 0.4f
+        }
+        wallSmoothedDeltas = smoothed
+        return smoothed
+    }
+
+    private fun averageLifts(samples: List<FloatArray>): FloatArray {
+        val result = FloatArray(5)
+        if (samples.isEmpty()) return result
+        for (i in result.indices) {
+            var sum = 0f
+            for (sample in samples) {
+                sum += sample[i]
+            }
+            result[i] = sum / samples.size
+        }
+        return result
+    }
+
     private fun startRest() {
+        restJob?.cancel()
         val restSec = currentExercise.restBetweenSetsSec
         statusText.text = "Отдых"
         restTimerText.visibility = View.VISIBLE
         isResting = true
         wallStableFrames = 0
         resetGestureState()
+        overlay.setCalibrationTint(WALL_TINT_NONE)
+        if (currentExerciseId == EXERCISE_WALL_ID) {
+            wallCalibration = null
+            wallCalibrating = false
+            wallCalibrationFrames = 0
+            wallCalibrationSamples.clear()
+            wallCalibrationPalmSamples.clear()
+            wallSmoothedDeltas = null
+            wallStepArmed = true
+        }
         AppLogger.log("REST", "Rest started: exercise=$currentExerciseId, set=$currentSet, restSec=$restSec")
         TtsManager.speak("Подход завершен. Отдых $restSec секунд.")
-        lifecycleScope.launch {
+        restJob = lifecycleScope.launch {
             var timeLeft = restSec
             while (timeLeft > 0) {
                 restTimerText.text = timeLeft.toString()
@@ -558,7 +814,7 @@ class SessionActivity : AppCompatActivity() {
             statusText.text = "Продолжаем!"
             TtsManager.speak("Продолжаем выполнение.")
             if (currentExerciseId == EXERCISE_WALL_ID) {
-                wallStarted = false
+                beginWallCalibration()
             }
         }
     }
@@ -566,6 +822,7 @@ class SessionActivity : AppCompatActivity() {
     private fun finishCurrentExercise() {
         if (isProcessingTransition) return
         isProcessingTransition = true
+        overlay.setCalibrationTint(WALL_TINT_NONE)
         AppLogger.log("FINISH", "Exercise completed: $currentExerciseId")
 
         lifecycleScope.launch {
@@ -609,6 +866,9 @@ class SessionActivity : AppCompatActivity() {
                 updateCircles()
                 updateUi()
                 TtsManager.speak(exerciseAnnouncement())
+                if (currentExerciseId == EXERCISE_WALL_ID) {
+                    beginWallCalibration()
+                }
                 isProcessingTransition = false
             } else {
                 AppLogger.log("SESSION", "All exercises completed")

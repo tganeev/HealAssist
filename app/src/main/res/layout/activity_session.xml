@@ -33,7 +33,7 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_gravity="top"
-        android:background="#80000000"
+        android:background="@color/session_panel_scrim"
         android:paddingVertical="12dp"
         android:paddingHorizontal="8dp"
         android:scrollbars="none">
@@ -131,7 +131,7 @@
         android:layout_gravity="bottom"
         android:orientation="vertical"
         android:padding="20dp"
-        android:background="#80000000">
+        android:background="@color/session_panel_scrim">
 
         <TextView
             android:id="@+id/sessionTarget"

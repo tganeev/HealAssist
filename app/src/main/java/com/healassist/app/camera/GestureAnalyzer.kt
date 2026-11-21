@@ -1,8 +1,10 @@
 package com.healassist.app.camera
 
+import com.google.mediapipe.tasks.components.containers.Landmark
 import com.google.mediapipe.tasks.components.containers.NormalizedLandmark
 import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult
 import kotlin.math.hypot
+import kotlin.math.sqrt
 
 enum class HandGesture {
     NONE, FIST, OPEN_PALM, UNKNOWN
@@ -121,6 +123,20 @@ object GestureAnalyzer {
         }
     }
 
+    fun getPalmSizeWorld(hand: List<Landmark>): Float {
+        if (hand.size < 21) return 0f
+        return dist3D(hand[0], hand[9]).coerceAtLeast(0.001f)
+    }
+
+    fun getFingerLiftsWorld(hand: List<Landmark>): FloatArray {
+        if (hand.size < 21) return FloatArray(5)
+        val palmSize = getPalmSizeWorld(hand)
+        return FloatArray(5) { i ->
+            val (tipIdx, mcpIdx) = FINGER_PAIRS[i]
+            (hand[mcpIdx].y() - hand[tipIdx].y()) / palmSize
+        }
+    }
+
     /**
      * Относительные lift'ы, нормализованные ТОЛЬКО по 4 "обычным" пальцам
      * (I, M, R, P — индексы 0..3). Большой (idx=4) из медианы исключён,
@@ -170,6 +186,20 @@ object GestureAnalyzer {
             .all { lifts[it] < downThreshold }
     }
 
+    fun othersAreDownDelta(
+        lifts: FloatArray,
+        expectedIdx: Int,
+        downThreshold: Float = 0.02f,
+        thumbDownThreshold: Float = 0.12f
+    ): Boolean {
+        if (expectedIdx !in lifts.indices) return false
+        return lifts.indices
+            .filter { it != expectedIdx }
+            .all { i ->
+                lifts[i] < if (i == 4) thumbDownThreshold else downThreshold
+            }
+    }
+
     private fun isFingerExtended(tip: NormalizedLandmark, mcp: NormalizedLandmark, wrist: NormalizedLandmark): Boolean {
         val distTip = hypot(tip.x() - wrist.x(), tip.y() - wrist.y())
         val distMcp = hypot(mcp.x() - wrist.x(), mcp.y() - wrist.y())
@@ -178,4 +208,11 @@ object GestureAnalyzer {
 
     private fun dist(a: NormalizedLandmark, b: NormalizedLandmark): Float =
         hypot(a.x() - b.x(), a.y() - b.y())
+
+    private fun dist3D(a: Landmark, b: Landmark): Float {
+        val dx = a.x() - b.x()
+        val dy = a.y() - b.y()
+        val dz = a.z() - b.z()
+        return sqrt(dx * dx + dy * dy + dz * dz)
+    }
 }

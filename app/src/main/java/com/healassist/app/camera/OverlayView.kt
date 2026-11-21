@@ -23,6 +23,11 @@ class OverlayView @JvmOverloads constructor(
         strokeWidth = 5f
     }
 
+    private var calibrationTint: Int = 0
+    private val tintPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+    }
+
     fun setFrame(landmarks: List<NormalizedLandmark>, width: Int, height: Int) {
         this.landmarks = landmarks
         this.imageWidth = width
@@ -35,10 +40,21 @@ class OverlayView @JvmOverloads constructor(
         invalidate()
     }
 
+    fun setCalibrationTint(color: Int) {
+        if (calibrationTint == color) return
+        calibrationTint = color
+        invalidate()
+    }
+
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        val lm = landmarks ?: return
 
+        if (calibrationTint != 0) {
+            tintPaint.color = calibrationTint
+            canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), tintPaint)
+        }
+
+        val lm = landmarks ?: return
         val scaleX = width.toFloat() / imageWidth
         val scaleY = height.toFloat() / imageHeight
 
@@ -48,10 +64,10 @@ class OverlayView @JvmOverloads constructor(
             if (mirrored) {
                 x = width - x
             }
-            // Рисуем только точки рук (индексы 15-22) и лица (0-10) для простоты
             if (point.visibility().orElse(0f) > 0.5f) {
                 canvas.drawCircle(x, y, 8f, pointPaint)
             }
         }
     }
+
 }
