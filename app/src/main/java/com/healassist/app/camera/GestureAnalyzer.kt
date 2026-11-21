@@ -189,15 +189,12 @@ object GestureAnalyzer {
     fun othersAreDownDelta(
         lifts: FloatArray,
         expectedIdx: Int,
-        downThreshold: Float = 0.02f,
-        thumbDownThreshold: Float = 0.12f
+        downThreshold: Float = 0.05f
     ): Boolean {
         if (expectedIdx !in lifts.indices) return false
-        return lifts.indices
+        return (0..3)
             .filter { it != expectedIdx }
-            .all { i ->
-                lifts[i] < if (i == 4) thumbDownThreshold else downThreshold
-            }
+            .all { lifts[it] < downThreshold }
     }
 
     private fun isFingerExtended(tip: NormalizedLandmark, mcp: NormalizedLandmark, wrist: NormalizedLandmark): Boolean {

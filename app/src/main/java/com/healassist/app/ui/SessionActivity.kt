@@ -64,8 +64,7 @@ class SessionActivity : AppCompatActivity() {
         private const val WALL_CALIBRATION_FRAMES_REQUIRED = 18
         private const val WALL_LIFT_DELTA_THRESHOLD = 0.04f
         private const val WALL_THUMB_DELTA_THRESHOLD = 0.10f
-        private const val WALL_DOWN_DELTA_THRESHOLD = 0.03f
-        private const val WALL_THUMB_DOWN_DELTA_THRESHOLD = 0.12f
+        private const val WALL_DOWN_DELTA_THRESHOLD = 0.05f
         private const val WALL_RELEASE_DELTA_THRESHOLD = 0.02f
         private const val WALL_THUMB_RELEASE_DELTA_THRESHOLD = 0.05f
         private const val WALL_LIFT_TOLERANCE = 0.02f
@@ -533,11 +532,11 @@ class SessionActivity : AppCompatActivity() {
             val expectedIsMost = GestureAnalyzer.isExpectedMostLifted4(
                 smoothed, expectedIdx, WALL_LIFT_TOLERANCE
             )
+            val othersLimit = WALL_DOWN_DELTA_THRESHOLD.coerceAtLeast(smoothed[expectedIdx] * 0.5f)
             val othersDown = GestureAnalyzer.othersAreDownDelta(
                 smoothed,
                 expectedIdx,
-                WALL_DOWN_DELTA_THRESHOLD,
-                WALL_THUMB_DOWN_DELTA_THRESHOLD,
+                othersLimit,
             )
             val canCount = wallStepArmed &&
                 now - wallLastCountMs >= WALL_MIN_COUNT_INTERVAL_MS
