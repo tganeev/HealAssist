@@ -13,7 +13,7 @@ import androidx.room.RoomDatabase
         ExerciseSessionEntity::class,
         AppLogEntity::class // <-- 1. ДОБАВЛЯЕМ ЛОГИ СЮДА
     ],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 abstract class PoseCounterDatabase : RoomDatabase() {

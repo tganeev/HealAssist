@@ -23,7 +23,6 @@ class CalendarViewModel(app: Application) : AndroidViewModel(app) {
 
     init {
         viewModelScope.launch(Dispatchers.IO) {
-            RehabSeed.seed(db)
             loadForDate(LocalDate.now())
         }
     }

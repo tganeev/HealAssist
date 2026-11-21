@@ -27,9 +27,12 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.healassist.app.data.ComplexType
+import com.healassist.app.data.ScheduledExerciseEntity
 import com.healassist.app.data.ScheduledStatus
 import com.healassist.app.ui.SessionActivity
 import com.healassist.app.ui.logs.LogsScreen
+import com.healassist.app.ui.programs.ProgramsScreen
 import com.healassist.app.utils.AppLogger
 import java.time.DayOfWeek
 import java.time.LocalDate
@@ -53,6 +56,9 @@ fun CalendarScreen(vm: CalendarViewModel = viewModel()) {
     // Состояние "показать экран логов"
     var showLogs by remember { mutableStateOf(false) }
 
+    // Состояние "показать экран программ"
+    var showPrograms by remember { mutableStateOf(false) }
+
     // Состояние меню-бургера
     var menuExpanded by remember { mutableStateOf(false) }
 
@@ -74,6 +80,14 @@ fun CalendarScreen(vm: CalendarViewModel = viewModel()) {
     }
 
 
+    if (showPrograms) {
+        ProgramsScreen(onBack = {
+            showPrograms = false
+            vm.refresh()
+        })
+        return
+    }
+
     if (showLogs) {
         LogsScreen(onBack = { showLogs = false })
         return
@@ -92,6 +106,13 @@ fun CalendarScreen(vm: CalendarViewModel = viewModel()) {
                             expanded = menuExpanded,
                             onDismissRequest = { menuExpanded = false }
                         ) {
+                            DropdownMenuItem(
+                                text = { Text("Программы") },
+                                onClick = {
+                                    menuExpanded = false
+                                    showPrograms = true
+                                }
+                            )
                             DropdownMenuItem(
                                 text = { Text("Логи") },
                                 onClick = {
@@ -132,75 +153,111 @@ fun CalendarScreen(vm: CalendarViewModel = viewModel()) {
             DaysStrip(days = weekDays, selectedDate = selectedDate, onDateClick = { vm.selectDate(it) })
             HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
 
-            // Список карточек на день
+            // Список комплексов на день
             if (dailyExercises.isEmpty()) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("На этот день упражнений нет.", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            } else {
-                val doneCount = dailyExercises.count { it.status == ScheduledStatus.DONE }
-                val totalCount = dailyExercises.size
-                val isAllDone = doneCount == totalCount
-
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable(enabled = !isAllDone) {
-                                val pendingIds = dailyExercises
-                                    .filter { it.status == ScheduledStatus.PLANNED }
-                                    .map { it.exerciseId }
-                                if (pendingIds.isNotEmpty()) {
-                                    val isFirstExercisePending = pendingIds.contains("ex1")
-
-                                    val intent = Intent(context, SessionActivity::class.java).apply {
-                                        putExtra(SessionActivity.EXTRA_EXERCISE_ID, pendingIds.first())
-                                        putExtra(SessionActivity.EXTRA_PENDING_LIST, ArrayList(pendingIds))
-                                        putExtra(SessionActivity.EXTRA_IS_FIRST, isFirstExercisePending)
-                                    }
-                                    context.startActivity(intent)
-                                }
-                            },
-                        colors = CardDefaults.cardColors(
-                            containerColor = if (isAllDone) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.surface
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            "На этот день упражнений нет.",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth().padding(16.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = "Утренний комплекс",
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 16.sp
-                                )
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Text(
-                                    text = "Выполнено $doneCount из $totalCount упражнений",
-                                    fontSize = 14.sp,
-                                    color = if (isAllDone) ColorGreen else MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-
-                            if (isAllDone) {
-                                Icon(
-                                    Icons.Default.CheckCircle,
-                                    contentDescription = null,
-                                    tint = ColorGreen,
-                                    modifier = Modifier.size(28.dp)
-                                )
-                            } else {
-                                Icon(
-                                    Icons.Default.PlayArrow,
-                                    contentDescription = "Начать",
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(28.dp)
-                                )
-                            }
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Button(onClick = { showPrograms = true }) {
+                            Text("Открыть программы")
                         }
                     }
                 }
+            } else {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    listOf(
+                        ComplexType.MORNING to "Утренний комплекс",
+                        ComplexType.EVENING to "Вечерний комплекс"
+                    ).forEach { (complexType, title) ->
+                        val exercises = dailyExercises.filter { it.complexType == complexType }
+                        if (exercises.isNotEmpty()) {
+                            ComplexCard(
+                                title = title,
+                                exercises = exercises,
+                                onStart = { pendingIds ->
+                                    val intent = Intent(context, SessionActivity::class.java).apply {
+                                        putExtra(SessionActivity.EXTRA_EXERCISE_ID, pendingIds.first())
+                                        putExtra(SessionActivity.EXTRA_PENDING_LIST, ArrayList(pendingIds))
+                                        putExtra(
+                                            SessionActivity.EXTRA_IS_FIRST,
+                                            pendingIds.contains("ex1")
+                                        )
+                                        putExtra(SessionActivity.EXTRA_COMPLEX_TYPE, complexType)
+                                    }
+                                    context.startActivity(intent)
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ComplexCard(
+    title: String,
+    exercises: List<ScheduledExerciseEntity>,
+    onStart: (List<String>) -> Unit,
+) {
+    val doneCount = exercises.count { it.status == ScheduledStatus.DONE }
+    val totalCount = exercises.size
+    val isAllDone = totalCount > 0 && doneCount == totalCount
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(enabled = !isAllDone) {
+                val pendingIds = exercises
+                    .filter { it.status == ScheduledStatus.PLANNED }
+                    .map { it.exerciseId }
+                if (pendingIds.isNotEmpty()) onStart(pendingIds)
+            },
+        colors = CardDefaults.cardColors(
+            containerColor = if (isAllDone) MaterialTheme.colorScheme.surfaceVariant
+            else MaterialTheme.colorScheme.surface
+        )
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = title,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 16.sp
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Выполнено $doneCount из $totalCount упражнений",
+                    fontSize = 14.sp,
+                    color = if (isAllDone) ColorGreen else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            if (isAllDone) {
+                Icon(
+                    Icons.Default.CheckCircle,
+                    contentDescription = null,
+                    tint = ColorGreen,
+                    modifier = Modifier.size(28.dp)
+                )
+            } else {
+                Icon(
+                    Icons.Default.PlayArrow,
+                    contentDescription = "Начать",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(28.dp)
+                )
             }
         }
     }

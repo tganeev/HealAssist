@@ -13,6 +13,12 @@ interface RehabProgramDao {
     @Query("SELECT * FROM rehab_program WHERE id = :id LIMIT 1")
     suspend fun findById(id: String): RehabProgramEntity?
 
+    @Query("SELECT * FROM rehab_program ORDER BY startDate DESC LIMIT 1")
+    suspend fun getLatest(): RehabProgramEntity?
+
+    @Query("DELETE FROM rehab_program")
+    suspend fun deleteAll()
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(program: RehabProgramEntity)
 }
@@ -44,6 +50,9 @@ interface ScheduledExerciseDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(item: ScheduledExerciseEntity)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertAll(items: List<ScheduledExerciseEntity>)
 }
 
 @Dao

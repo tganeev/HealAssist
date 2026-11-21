@@ -11,6 +11,11 @@ object ScheduledStatus {
     const val SKIPPED = "SKIPPED"
 }
 
+object ComplexType {
+    const val MORNING = "MORNING"
+    const val EVENING = "EVENING"
+}
+
 @Entity(
     tableName = "scheduled_exercise",
     foreignKeys = [
@@ -21,13 +26,18 @@ object ScheduledStatus {
             onDelete = ForeignKey.CASCADE
         )
     ],
-    indices = [Index("scheduledDate"), Index("exerciseId")]
+    indices = [
+        Index("scheduledDate"),
+        Index("exerciseId"),
+        Index(value = ["scheduledDate", "complexType"])
+    ]
 )
 data class ScheduledExerciseEntity(
     @PrimaryKey val id: String,
     val patientId: String? = null,
     val exerciseId: String,
     val scheduledDate: Long,
+    val complexType: String = ComplexType.MORNING,
     val status: String = "PLANNED",
     val sessionId: String? = null,
     val createdAt: Long = System.currentTimeMillis(),

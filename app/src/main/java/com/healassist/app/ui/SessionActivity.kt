@@ -27,6 +27,7 @@ import com.healassist.app.TtsManager
 import com.healassist.app.camera.GestureAnalyzer
 import com.healassist.app.camera.HandGesture
 import com.healassist.app.camera.HandLandmarkerHelper
+import com.healassist.app.data.ComplexType
 import com.healassist.app.data.ExerciseModel
 import com.healassist.app.data.ExerciseType
 import com.healassist.app.data.PoseCounterDatabase
@@ -44,6 +45,7 @@ class SessionActivity : AppCompatActivity() {
         const val EXTRA_EXERCISE_ID = "exercise_id"
         const val EXTRA_PENDING_LIST = "pending_list"
         const val EXTRA_IS_FIRST = "is_first"
+        const val EXTRA_COMPLEX_TYPE = "complex_type"
         private const val EXERCISE_FIRST_ID = "ex1"
         private const val EXERCISE_FAN_ID = "ex2"
         private const val EXERCISE_CLAW_ID = "ex3"
@@ -52,14 +54,19 @@ class SessionActivity : AppCompatActivity() {
         private const val EXERCISE_PIANO_ID = "ex6"
         private const val GESTURE_STABLE_MS = 300L
 
-        /** Сколько кадров подряд ожидаемый палец должен быть поднят (ex5). */
         private const val WALL_STABLE_FRAMES_REQUIRED = 6
 
-        /** Минимальный lift для "поднят" (ex5). Уменьшено, чтобы не тянуться высоко. */
-        private const val WALL_LIFT_THRESHOLD = 0.008f
+        /** Порог для "обычных" пальцев (I, M, R, P) относительно медианы. */
+        private const val WALL_RELATIVE_LIFT_THRESHOLD = 0.03f
 
-        /** Допуск для проверки "самый поднятый" (ex5). */
-        private const val WALL_LIFT_TOLERANCE = 0.02f
+        /** Порог для большого пальца — его raw изначально высокий. */
+        private const val WALL_THUMB_LIFT_THRESHOLD = 0.50f
+
+        /** Допуск для "самый поднятый" среди обычных пальцев. */
+        private const val WALL_LIFT_TOLERANCE = 0.05f
+
+        /** Остальные пальцы должны быть ниже этого уровня, чтобы засчитать. */
+        private const val WALL_DOWN_THRESHOLD = 0.10f
     }
 
     private lateinit var viewFinder: PreviewView
@@ -84,6 +91,7 @@ class SessionActivity : AppCompatActivity() {
 
     private var currentExerciseId = ""
     private val currentExercise get() = allExercises.find { it.id == currentExerciseId } ?: allExercises[0]
+    private var currentComplexType = ComplexType.MORNING
     private var pendingIds = mutableListOf<String>()
     private var isFirstExerciseInSession = false
 
@@ -138,8 +146,13 @@ class SessionActivity : AppCompatActivity() {
         currentExerciseId = intent.getStringExtra(EXTRA_EXERCISE_ID) ?: "ex1"
         pendingIds = intent.getStringArrayListExtra(EXTRA_PENDING_LIST) ?: mutableListOf(currentExerciseId)
         isFirstExerciseInSession = intent.getBooleanExtra(EXTRA_IS_FIRST, false)
+        currentComplexType = intent.getStringExtra(EXTRA_COMPLEX_TYPE) ?: ComplexType.MORNING
 
-        AppLogger.log("SESSION", "Session started: exercise=$currentExerciseId, pending=$pendingIds, isFirst=$isFirstExerciseInSession")
+        AppLogger.log(
+            "SESSION",
+            "Session started: exercise=$currentExerciseId, complex=$currentComplexType, " +
+                "pending=$pendingIds, isFirst=$isFirstExerciseInSession"
+        )
         updateCircles()
         updateUi()
 
@@ -316,12 +329,16 @@ class SessionActivity : AppCompatActivity() {
             )
         }
 
-        // Диагностика для "Стены": lift = (mcp.y - tip.y) / palmSize
+        // Диагностика для "Стены"
         if (currentExerciseId == EXERCISE_WALL_ID && now % 200 < 20) {
-            val lifts = GestureAnalyzer.getFingerLifts(hand)
+            val raw = GestureAnalyzer.getFingerLifts(hand)
+            val rel = GestureAnalyzer.getRelativeLifts4(hand)
             val names = listOf("I", "M", "R", "P", "Th")
-            val diag = lifts.mapIndexed { i, l -> "${names[i]}=${String.format("%.3f", l)}" }.joinToString(" ")
-            AppLogger.log("DIAG_ex5", "step=$wallCurrentStep frames=$wallStableFrames | $diag")
+            val diag = names.indices.joinToString(" ") { i ->
+                "${names[i]}=${String.format("%.2f", raw[i])}/${String.format("%.2f", rel[i])}"
+            }
+            val others = GestureAnalyzer.othersAreDown(rel, wallCurrentStep, WALL_DOWN_THRESHOLD)
+            AppLogger.log("DIAG_ex5", "step=$wallCurrentStep frames=$wallStableFrames othersDown=$others | $diag")
         }
 
         if (isProcessingTransition || isResting) {
@@ -334,15 +351,21 @@ class SessionActivity : AppCompatActivity() {
 
         if (currentExerciseId == EXERCISE_WALL_ID) {
             // --- ЛОГИКА УПРАЖНЕНИЯ "СТЕНА" ---
-            val lifts = GestureAnalyzer.getFingerLifts(hand)
+            val relLifts = GestureAnalyzer.getRelativeLifts4(hand)
             val expectedIdx = wallCurrentStep
 
-            // Ожидаемый палец поднят: lift > 0.008 И он не ниже остальных (с допуском 0.03).
-            val expectedLifted = lifts[expectedIdx] > WALL_LIFT_THRESHOLD
-            val expectedIsMost = GestureAnalyzer.isExpectedMostLifted(
-                lifts, expectedIdx, WALL_LIFT_TOLERANCE
+            val expectedLifted = if (expectedIdx == 4) {
+                relLifts[4] > WALL_THUMB_LIFT_THRESHOLD
+            } else {
+                relLifts[expectedIdx] > WALL_RELATIVE_LIFT_THRESHOLD
+            }
+            val expectedIsMost = GestureAnalyzer.isExpectedMostLifted4(
+                relLifts, expectedIdx, WALL_LIFT_TOLERANCE
             )
-            val isExpectedLifted = expectedLifted && expectedIsMost
+            val othersDown = GestureAnalyzer.othersAreDown(
+                relLifts, expectedIdx, WALL_DOWN_THRESHOLD
+            )
+            val isExpectedLifted = expectedLifted && expectedIsMost && othersDown
 
             if (!wallStarted) {
                 wallStarted = true
@@ -357,7 +380,6 @@ class SessionActivity : AppCompatActivity() {
                     gesture = HandGesture.OPEN_PALM
                     val countedName = wallFingerNames[wallCurrentStep]
                     AppLogger.log("REP", "exercise=ex5, set=$currentSet, cycle=$wallRepCount, step=$wallCurrentStep ($countedName)")
-                    // FIX: вместо названия пальца — "Отлично".
                     TtsManager.speak("Отлично", flushQueue = false)
 
                     wallCurrentStep++
@@ -552,12 +574,20 @@ class SessionActivity : AppCompatActivity() {
                     val db = PoseCounterDatabase.get(this@SessionActivity)
                     val todayUtc = java.time.LocalDate.now().atStartOfDay(java.time.ZoneOffset.UTC).toInstant().toEpochMilli()
                     val schedules = db.scheduledExerciseDao().getForDate(todayUtc)
-                    val schedule = schedules.find { it.exerciseId == currentExerciseId }
+                    val schedule = schedules.find {
+                        it.exerciseId == currentExerciseId && it.complexType == currentComplexType
+                    }
                     if (schedule != null) {
                         db.scheduledExerciseDao().markStatus(schedule.id, ScheduledStatus.DONE, null)
-                        AppLogger.log("DB", "Marked exercise as DONE: $currentExerciseId")
+                        AppLogger.log(
+                            "DB",
+                            "Marked exercise as DONE: $currentExerciseId, complex=$currentComplexType"
+                        )
                     } else {
-                        AppLogger.log("DB", "No schedule found for $currentExerciseId on today")
+                        AppLogger.log(
+                            "DB",
+                            "No schedule found for $currentExerciseId, complex=$currentComplexType on today"
+                        )
                     }
                 } catch (e: Exception) {
                     AppLogger.log("DB", "Error saving status: ${e.message}")
