@@ -98,8 +98,8 @@ class SessionActivity : AppCompatActivity() {
         ExerciseModel("ex2", "Веер", "Раскройте ладонь и максимально широко разведите все пальцы в стороны, затем сведите их вместе.", 2, 5, 10, ExerciseType.FINGER),
         ExerciseModel("ex3", "Когти", "Согните пальцы в средних суставах, имитируя кошачьи когти, не сжимая кулак. Затем выпрямите.", 2, 5, 10, ExerciseType.FINGER),
         ExerciseModel("ex4", "Подушечки", "Большим пальцем поочередно касайтесь подушечек остальных пальцев.", 2, 5, 10, ExerciseType.FINGER),
-        ExerciseModel("ex5", "Стена", "Ладонь на столе. По очереди поднимайте каждый палец: указательный, средний, безымянный, мизинец, большой.", 2, 5, 10, ExerciseType.FINGER),
-        ExerciseModel("ex6", "Пианино", "Постучите подушечками пальцев по столу, имитируя игру на пианино.", 2, 5, 10, ExerciseType.FINGER)
+        ExerciseModel("ex5", "Стена", "Ладонь на столе. По очереди поднимайте каждый палец", 2, 5, 10, ExerciseType.FINGER),
+        ExerciseModel("ex6", "Пианино", "Ладонь на столе. По очереди поднимайте каждый палец", 2, 5, 10, ExerciseType.FINGER)
     )
 
     private var currentExerciseId = ""

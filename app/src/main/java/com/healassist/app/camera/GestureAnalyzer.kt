@@ -38,12 +38,12 @@ object GestureAnalyzer {
         if (!isFingerExtended(hand[8], hand[5], hand[0]) || !isFingerExtended(hand[20], hand[17], hand[0]))
             return HandGesture.UNKNOWN
         return when {
-            spreadRatio > 1.80f -> HandGesture.OPEN_PALM
-            spreadRatio < 1.60f -> HandGesture.FIST
+            spreadRatio > 1.70f -> HandGesture.OPEN_PALM
+            spreadRatio < 1.52f -> HandGesture.FIST
             else -> when (previous) {
                 HandGesture.OPEN_PALM -> HandGesture.OPEN_PALM
                 HandGesture.FIST -> HandGesture.FIST
-                else -> if (spreadRatio > 1.70f) HandGesture.OPEN_PALM else HandGesture.FIST
+                else -> if (spreadRatio > 1.62f) HandGesture.OPEN_PALM else HandGesture.FIST
             }
         }
     }
@@ -61,13 +61,13 @@ object GestureAnalyzer {
             val ratio = tipDist / mcpDist
             when {
                 ratio < 0.9f -> fistCount++
-                ratio < 1.6f -> clawCount++
+                ratio < 1.8f -> clawCount++
                 else -> straightCount++
             }
         }
         return when {
             straightCount >= 3 -> HandGesture.OPEN_PALM
-            clawCount >= 2 && straightCount == 0 -> HandGesture.FIST
+            clawCount >= 2 && straightCount <= 1 -> HandGesture.FIST
             fistCount >= 3 -> HandGesture.UNKNOWN
             else -> HandGesture.UNKNOWN
         }
