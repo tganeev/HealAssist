@@ -33,18 +33,8 @@ object RehabProgramCatalog {
         ),
     )
 
-    val TRAUMA_REHABILITATION = RehabProgramTemplate(
-        id = "trauma-rehabilitation",
-        title = "Реабилитация после травм",
-        description = "Программа восстановления после травм находится в разработке.",
-        durationDays = 0,
-        exerciseIds = emptyList(),
-        isAvailable = false,
-    )
-
     val all: List<RehabProgramTemplate> = listOf(
         STROKE_REHABILITATION,
-        TRAUMA_REHABILITATION,
     )
 }
 
