@@ -42,10 +42,12 @@ object ProgramInstaller {
     suspend fun install(
         db: PoseCounterDatabase,
         template: RehabProgramTemplate,
+        settings: ProgramSettings,
         startDate: LocalDate,
     ): RehabProgramEntity {
+        val durationDays = settings.durationDays.coerceAtLeast(1)
         val startUtc = startDate.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli()
-        val lastDate = startDate.plusDays((template.durationDays - 1).toLong())
+        val lastDate = startDate.plusDays((durationDays - 1).toLong())
         val endUtc = lastDate.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli()
 
         return db.withTransaction {
@@ -62,23 +64,24 @@ object ProgramInstaller {
             db.rehabProgramDao().upsert(program)
 
             val exercises = template.exerciseIds.mapIndexed { index, exerciseId ->
+                val exerciseSettings = settings.exercise(exerciseId)
                 ProgramExerciseEntity(
                     id = exerciseId,
                     programId = program.id,
                     exerciseType = "FINGER",
-                    targetReps = 5,
-                    targetSets = 2,
-                    restSeconds = 10,
+                    targetReps = exerciseSettings.reps,
+                    targetSets = exerciseSettings.sets,
+                    restSeconds = exerciseSettings.restSeconds,
                     orderIndex = index,
-                    durationDays = template.durationDays,
+                    durationDays = durationDays,
                 )
             }
             db.programExerciseDao().upsertAll(exercises)
 
             val scheduled = ArrayList<ScheduledExerciseEntity>(
-                template.durationDays * template.exerciseIds.size * 2
+                durationDays * template.exerciseIds.size * 2
             )
-            for (day in 0 until template.durationDays) {
+            for (day in 0 until durationDays) {
                 val dateUtc = startDate.plusDays(day.toLong())
                     .atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli()
                 for (complexType in listOf(ComplexType.MORNING, ComplexType.EVENING)) {

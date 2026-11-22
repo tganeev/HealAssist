@@ -5,6 +5,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.healassist.app.data.PoseCounterDatabase
 import com.healassist.app.data.ProgramInstaller
+import com.healassist.app.data.ProgramSettings
 import com.healassist.app.data.RehabProgramEntity
 import com.healassist.app.data.RehabProgramTemplate
 import com.healassist.app.utils.AppLogger
@@ -38,6 +39,7 @@ class ProgramsViewModel(app: Application) : AndroidViewModel(app) {
 
     fun install(
         template: RehabProgramTemplate,
+        settings: ProgramSettings,
         startDate: LocalDate,
         onResult: (Boolean) -> Unit,
     ) {
@@ -46,10 +48,10 @@ class ProgramsViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val success = withContext(Dispatchers.IO) {
                 try {
-                    ProgramInstaller.install(db, template, startDate)
+                    ProgramInstaller.install(db, template, settings, startDate)
                     AppLogger.log(
                         "PROGRAM",
-                        "Installed ${template.id} from $startDate for ${template.durationDays} days"
+                        "Installed ${template.id} from $startDate for ${settings.durationDays} days"
                     )
                     true
                 } catch (e: Exception) {

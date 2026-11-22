@@ -17,10 +17,10 @@ object GestureAnalyzer {
         return analyze(result.landmarks()[0])
     }
 
-    fun analyze(hand: List<NormalizedLandmark>): HandGesture {
+    fun analyze(hand: List<NormalizedLandmark>, extensionRatio: Float = 1.20f): HandGesture {
         if (hand.size < 21) return HandGesture.NONE
         val extendedCount = listOf(8, 12, 16, 20).count { tipIdx ->
-            isFingerExtended(hand[tipIdx], hand[tipIdx - 3], hand[0])
+            isFingerExtended(hand[tipIdx], hand[tipIdx - 3], hand[0], extensionRatio)
         }
         return when {
             extendedCount == 4 -> HandGesture.OPEN_PALM
@@ -29,26 +29,41 @@ object GestureAnalyzer {
         }
     }
 
-    fun analyzeFan(hand: List<NormalizedLandmark>, previous: HandGesture = HandGesture.UNKNOWN): HandGesture {
+    fun analyzeFan(
+        hand: List<NormalizedLandmark>,
+        previous: HandGesture = HandGesture.UNKNOWN,
+        openRatio: Float = 1.70f,
+        closeRatio: Float = 1.52f,
+        extensionRatio: Float = 1.20f,
+    ): HandGesture {
         if (hand.size < 21) return HandGesture.NONE
         val totalSpread = dist(hand[8], hand[12]) + dist(hand[12], hand[16]) + dist(hand[16], hand[20])
         val palmLength = dist(hand[0], hand[9])
         if (palmLength < 0.01f) return HandGesture.UNKNOWN
         val spreadRatio = totalSpread / palmLength
-        if (!isFingerExtended(hand[8], hand[5], hand[0]) || !isFingerExtended(hand[20], hand[17], hand[0]))
-            return HandGesture.UNKNOWN
+        if (!isFingerExtended(hand[8], hand[5], hand[0], extensionRatio) ||
+            !isFingerExtended(hand[20], hand[17], hand[0], extensionRatio)
+        ) return HandGesture.UNKNOWN
         return when {
-            spreadRatio > 1.70f -> HandGesture.OPEN_PALM
-            spreadRatio < 1.52f -> HandGesture.FIST
+            spreadRatio > openRatio -> HandGesture.OPEN_PALM
+            spreadRatio < closeRatio -> HandGesture.FIST
             else -> when (previous) {
                 HandGesture.OPEN_PALM -> HandGesture.OPEN_PALM
                 HandGesture.FIST -> HandGesture.FIST
-                else -> if (spreadRatio > 1.62f) HandGesture.OPEN_PALM else HandGesture.FIST
+                else -> if (spreadRatio > (openRatio + closeRatio) / 2f) {
+                    HandGesture.OPEN_PALM
+                } else {
+                    HandGesture.FIST
+                }
             }
         }
     }
 
-    fun analyzeClaw(hand: List<NormalizedLandmark>): HandGesture {
+    fun analyzeClaw(
+        hand: List<NormalizedLandmark>,
+        fistRatio: Float = 0.90f,
+        straightRatio: Float = 1.80f,
+    ): HandGesture {
         if (hand.size < 21) return HandGesture.NONE
         val fingers: List<Triple<Int, Int, Int>> = listOf(
             Triple(8, 5, 0), Triple(12, 9, 0), Triple(16, 13, 0), Triple(20, 17, 0)
@@ -60,8 +75,8 @@ object GestureAnalyzer {
             if (mcpDist < 0.001f) continue
             val ratio = tipDist / mcpDist
             when {
-                ratio < 0.9f -> fistCount++
-                ratio < 1.8f -> clawCount++
+                ratio < fistRatio -> fistCount++
+                ratio < straightRatio -> clawCount++
                 else -> straightCount++
             }
         }
@@ -73,24 +88,22 @@ object GestureAnalyzer {
         }
     }
 
-    fun isThumbTouching(hand: List<NormalizedLandmark>): Boolean {
+    fun isThumbTouching(hand: List<NormalizedLandmark>, touchThreshold: Float = 0.05f): Boolean {
         if (hand.size < 21) return false
         val thumbTip = hand[4]
         val fingerTips = listOf(8, 12, 16, 20)
-        val touchThreshold = 0.05f
         for (tipIdx in fingerTips) {
             if (dist(thumbTip, hand[tipIdx]) < touchThreshold) return true
         }
         return false
     }
 
-    fun analyzePiano(hand: List<NormalizedLandmark>): Int {
+    fun analyzePiano(hand: List<NormalizedLandmark>, touchThreshold: Float = 0.025f): Int {
         if (hand.size < 21) return -1
         val wristY = hand[0].y()
         val tips = listOf(8 to 0, 12 to 1, 16 to 2, 20 to 3, 4 to 4)
         var maxTipY = -1f
         var touchingFingerIdx = -1
-        val touchThreshold = 0.025f
         for ((tipIdx, fingerIndex) in tips) {
             val tipY = hand[tipIdx].y()
             if (tipY > wristY + touchThreshold && tipY > maxTipY) {
@@ -197,10 +210,15 @@ object GestureAnalyzer {
             .all { lifts[it] < downThreshold }
     }
 
-    private fun isFingerExtended(tip: NormalizedLandmark, mcp: NormalizedLandmark, wrist: NormalizedLandmark): Boolean {
+    private fun isFingerExtended(
+        tip: NormalizedLandmark,
+        mcp: NormalizedLandmark,
+        wrist: NormalizedLandmark,
+        ratio: Float = 1.20f,
+    ): Boolean {
         val distTip = hypot(tip.x() - wrist.x(), tip.y() - wrist.y())
         val distMcp = hypot(mcp.x() - wrist.x(), mcp.y() - wrist.y())
-        return distTip > distMcp * 1.2f
+        return distTip > distMcp * ratio
     }
 
     private fun dist(a: NormalizedLandmark, b: NormalizedLandmark): Float =

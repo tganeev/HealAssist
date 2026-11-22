@@ -30,6 +30,7 @@ import androidx.compose.material.icons.filled.Event
 import androidx.compose.material.icons.filled.FitnessCenter
 import androidx.compose.material.icons.filled.MedicalServices
 import androidx.compose.material.icons.filled.NightsStay
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.WbSunny
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -63,6 +64,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.healassist.app.data.ProgramSettings
+import com.healassist.app.data.ProgramSettingsStore
 import com.healassist.app.data.RehabProgramCatalog
 import com.healassist.app.data.RehabProgramEntity
 import com.healassist.app.data.RehabProgramTemplate
@@ -85,7 +88,20 @@ fun ProgramsScreen(
     val installing by vm.isInstalling.collectAsState()
     var selectedTemplate by remember { mutableStateOf<RehabProgramTemplate?>(null) }
     var pendingTemplate by remember { mutableStateOf<RehabProgramTemplate?>(null) }
+    var configuredTemplate by remember { mutableStateOf<RehabProgramTemplate?>(null) }
     var selectedDate by remember { mutableStateOf(LocalDate.now()) }
+    var settings by remember { mutableStateOf(ProgramSettingsStore(context).load()) }
+
+    configuredTemplate?.let { template ->
+        ProgramSettingsScreen(
+            template = template,
+            onBack = {
+                configuredTemplate = null
+                settings = ProgramSettingsStore(context).load()
+            },
+        )
+        return
+    }
 
     fun pickDate() {
         val current = selectedDate
@@ -101,11 +117,11 @@ fun ProgramsScreen(
     }
 
     fun install(template: RehabProgramTemplate) {
-        vm.install(template, selectedDate) { success ->
+        vm.install(template, settings, selectedDate) { success ->
             Toast.makeText(
                 context,
                 if (success) {
-                    "Программа установлена на ${template.durationDays} дней"
+                    "Программа установлена на ${settings.durationDays} дней"
                 } else {
                     "Не удалось установить программу"
                 },
@@ -141,6 +157,7 @@ fun ProgramsScreen(
             items(RehabProgramCatalog.all, key = { it.id }) { template ->
                 ProgramCard(
                     template = template,
+                    settings = settings,
                     installed = installed,
                     onClick = {
                         selectedDate = LocalDate.now()
@@ -154,10 +171,12 @@ fun ProgramsScreen(
     selectedTemplate?.let { template ->
         ProgramDetailSheet(
             template = template,
+            settings = settings,
             installed = installed,
             installing = installing,
             selectedDate = selectedDate,
             onPickDate = ::pickDate,
+            onConfigure = { configuredTemplate = template },
             onInstall = {
                 if (installed != null) {
                     pendingTemplate = template
@@ -176,7 +195,7 @@ fun ProgramsScreen(
             text = {
                 Text(
                     "Текущая программа и её расписание будут заменены " +
-                        "новым периодом на ${template.durationDays} дней."
+                        "новым периодом на ${settings.durationDays} дней."
                 )
             },
             confirmButton = {
@@ -195,6 +214,7 @@ fun ProgramsScreen(
 @Composable
 private fun ProgramCard(
     template: RehabProgramTemplate,
+    settings: ProgramSettings,
     installed: RehabProgramEntity?,
     onClick: () -> Unit,
 ) {
@@ -280,7 +300,7 @@ private fun ProgramCard(
             if (template.isAvailable) {
                 Spacer(modifier = Modifier.height(12.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    InfoChip("${template.durationDays} дней")
+                    InfoChip("${settings.durationDays} дней")
                     InfoChip("2 комплекса")
                     InfoChip("${template.exerciseIds.size} упражнений")
                 }
@@ -293,10 +313,12 @@ private fun ProgramCard(
 @Composable
 private fun ProgramDetailSheet(
     template: RehabProgramTemplate,
+    settings: ProgramSettings,
     installed: RehabProgramEntity?,
     installing: Boolean,
     selectedDate: LocalDate,
     onPickDate: () -> Unit,
+    onConfigure: () -> Unit,
     onInstall: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -320,7 +342,7 @@ private fun ProgramDetailSheet(
                         .verticalScroll(rememberScrollState())
                 ) {
                     ProgramDetailHeader(template, installedProgram)
-                    ProgramDetailBody(template, installedProgram)
+                    ProgramDetailBody(template, settings, installedProgram)
                 }
                 HorizontalDivider()
                 Spacer(modifier = Modifier.height(12.dp))
@@ -332,6 +354,16 @@ private fun ProgramDetailSheet(
                     Icon(Icons.Default.Event, contentDescription = null)
                     Spacer(modifier = Modifier.width(8.dp))
                     Text("Дата начала: ${selectedDate.format(DateFormat)}")
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedButton(
+                    onClick = onConfigure,
+                    enabled = !installing,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Icon(Icons.Default.Settings, contentDescription = null)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Настроить программу")
                 }
                 Spacer(modifier = Modifier.height(8.dp))
                 Button(
@@ -367,7 +399,7 @@ private fun ProgramDetailSheet(
                     .padding(bottom = 24.dp)
             ) {
                 ProgramDetailHeader(template, installedProgram)
-                ProgramDetailBody(template, installedProgram)
+                ProgramDetailBody(template, settings, installedProgram)
             }
         }
     }
@@ -420,6 +452,7 @@ private fun ProgramDetailHeader(
 @Composable
 private fun ProgramDetailBody(
     template: RehabProgramTemplate,
+    settings: ProgramSettings,
     installedProgram: RehabProgramEntity?,
 ) {
     Spacer(modifier = Modifier.height(16.dp))
@@ -457,7 +490,7 @@ private fun ProgramDetailBody(
 
     Spacer(modifier = Modifier.height(20.dp))
     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        InfoTile("Длительность", "${template.durationDays} дней", Modifier.weight(1f))
+        InfoTile("Длительность", "${settings.durationDays} дней", Modifier.weight(1f))
         InfoTile("Комплексы", "2", Modifier.weight(1f))
     }
     Spacer(modifier = Modifier.height(12.dp))

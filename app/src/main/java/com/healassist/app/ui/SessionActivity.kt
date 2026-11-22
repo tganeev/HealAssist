@@ -33,7 +33,10 @@ import com.healassist.app.camera.OverlayView
 import com.healassist.app.data.ComplexType
 import com.healassist.app.data.ExerciseModel
 import com.healassist.app.data.ExerciseType
+import com.healassist.app.data.ExerciseThresholds
 import com.healassist.app.data.PoseCounterDatabase
+import com.healassist.app.data.ProgramSettings
+import com.healassist.app.data.ProgramSettingsStore
 import com.healassist.app.data.ScheduledStatus
 import com.healassist.app.utils.AppLogger
 import kotlinx.coroutines.Dispatchers
@@ -58,15 +61,7 @@ class SessionActivity : AppCompatActivity() {
         private const val EXERCISE_THUMB_ID = "ex4"
         private const val EXERCISE_WALL_ID = "ex5"
         private const val EXERCISE_PIANO_ID = "ex6"
-        private const val GESTURE_STABLE_MS = 300L
-
-        private const val WALL_STABLE_FRAMES_REQUIRED = 6
         private const val WALL_CALIBRATION_FRAMES_REQUIRED = 18
-        private const val WALL_LIFT_DELTA_THRESHOLD = 0.04f
-        private const val WALL_THUMB_DELTA_THRESHOLD = 0.10f
-        private const val WALL_DOWN_DELTA_THRESHOLD = 0.05f
-        private const val WALL_RELEASE_DELTA_THRESHOLD = 0.02f
-        private const val WALL_THUMB_RELEASE_DELTA_THRESHOLD = 0.05f
         private const val WALL_LIFT_TOLERANCE = 0.02f
         private const val WALL_CALIBRATION_MAX_ORDINARY_LIFT = 0.15f
         private const val WALL_CALIBRATION_MAX_ORDINARY_SPREAD = 0.15f
@@ -93,7 +88,7 @@ class SessionActivity : AppCompatActivity() {
     private var cameraProvider: ProcessCameraProvider? = null
     private val cameraExecutor: ExecutorService = Executors.newSingleThreadExecutor()
 
-    private val allExercises = listOf(
+    private val baseExercises = listOf(
         ExerciseModel("ex1", "Сжатие кулака", "Сожьмите руку в кулак, задержиъте на пару секунд и полностью разожмите.", 2, 5, 10, ExerciseType.FINGER),
         ExerciseModel("ex2", "Веер", "Раскройте ладонь и максимально широко разведите все пальцы в стороны, затем сведите их вместе.", 2, 5, 10, ExerciseType.FINGER),
         ExerciseModel("ex3", "Когти", "Согните пальцы в средних суставах, имитируя кошачьи когти, не сжимая кулак. Затем выпрямите.", 2, 5, 10, ExerciseType.FINGER),
@@ -101,6 +96,19 @@ class SessionActivity : AppCompatActivity() {
         ExerciseModel("ex5", "Стена", "Ладонь на столе. По очереди поднимайте каждый палец", 2, 5, 10, ExerciseType.FINGER),
         ExerciseModel("ex6", "Пианино", "Ладонь на столе. По очереди поднимайте каждый палец", 2, 5, 10, ExerciseType.FINGER)
     )
+
+    private lateinit var programSettings: ProgramSettings
+    private val allExercises: List<ExerciseModel>
+        get() = baseExercises.map { base ->
+            val settings = programSettings.exercise(base.id)
+            base.copy(
+                targetSets = settings.sets,
+                repsPerSet = settings.reps,
+                restBetweenSetsSec = settings.restSeconds,
+            )
+        }
+    private val currentThresholds: ExerciseThresholds
+        get() = programSettings.exercise(currentExerciseId).effectiveThresholds
 
     private var currentExerciseId = ""
     private val currentExercise get() = allExercises.find { it.id == currentExerciseId } ?: allExercises[0]
@@ -165,6 +173,11 @@ class SessionActivity : AppCompatActivity() {
         exitButton = findViewById(R.id.sessionPauseButton)
         restTimerText = findViewById(R.id.restTimerText)
 
+        programSettings = ProgramSettingsStore(this).load()
+        AppLogger.log(
+            "SETTINGS",
+            "Loaded: duration=${programSettings.durationDays}, exercises=${programSettings.exercises.size}"
+        )
         setupCircleClickListeners()
         exitButton.text = "Выход"
         exitButton.setOnClickListener {
@@ -353,6 +366,7 @@ class SessionActivity : AppCompatActivity() {
     private fun processResult(result: HandLandmarkerResult, imageWidth: Int, imageHeight: Int) {
         if (isDestroyed) return
         val now = System.currentTimeMillis()
+        val thresholds = currentThresholds
 
         if (now - lastGestureLogTime > 1000) {
             lastGestureLogTime = now
@@ -514,14 +528,14 @@ class SessionActivity : AppCompatActivity() {
             val smoothed = smoothWallDeltas(delta)
             val expectedIdx = wallCurrentStep
             val expectedThreshold = if (expectedIdx == 4) {
-                WALL_THUMB_DELTA_THRESHOLD
+                thresholds.wallThumbDelta
             } else {
-                WALL_LIFT_DELTA_THRESHOLD
+                thresholds.wallLiftDelta
             }
             val releaseThreshold = if (expectedIdx == 4) {
-                WALL_THUMB_RELEASE_DELTA_THRESHOLD
+                thresholds.wallThumbReleaseDelta
             } else {
-                WALL_RELEASE_DELTA_THRESHOLD
+                thresholds.wallReleaseDelta
             }
 
             if (smoothed[expectedIdx] < releaseThreshold) {
@@ -532,7 +546,7 @@ class SessionActivity : AppCompatActivity() {
             val expectedIsMost = GestureAnalyzer.isExpectedMostLifted4(
                 smoothed, expectedIdx, WALL_LIFT_TOLERANCE
             )
-            val othersLimit = WALL_DOWN_DELTA_THRESHOLD.coerceAtLeast(smoothed[expectedIdx] * 0.5f)
+            val othersLimit = thresholds.wallDownDelta.coerceAtLeast(smoothed[expectedIdx] * 0.5f)
             val othersDown = GestureAnalyzer.othersAreDownDelta(
                 smoothed,
                 expectedIdx,
@@ -544,7 +558,7 @@ class SessionActivity : AppCompatActivity() {
 
             if (isExpectedLifted) {
                 wallStableFrames++
-                if (wallStableFrames >= WALL_STABLE_FRAMES_REQUIRED) {
+                if (wallStableFrames >= thresholds.wallStableFrames) {
                     wallStableFrames = 0
                     wallStepArmed = false
                     wallLastCountMs = now
@@ -588,7 +602,7 @@ class SessionActivity : AppCompatActivity() {
             }
         } else if (currentExerciseId == EXERCISE_PIANO_ID) {
             // --- ЛОГИКА УПРАЖНЕНИЯ "ПИАНИНО" ---
-            val touchedFinger = GestureAnalyzer.analyzePiano(hand)
+            val touchedFinger = GestureAnalyzer.analyzePiano(hand, thresholds.pianoTouchDistance)
             if (touchedFinger == -1) {
                 gesture = HandGesture.NONE
                 statusMessage = if (pianoCurrentStep == 0)
@@ -626,10 +640,24 @@ class SessionActivity : AppCompatActivity() {
         } else {
             // --- СТАНДАРТНАЯ ЛОГИКА ---
             gesture = when (currentExerciseId) {
-                EXERCISE_FAN_ID -> GestureAnalyzer.analyzeFan(hand, lastAnalyzedGesture)
-                EXERCISE_CLAW_ID -> GestureAnalyzer.analyzeClaw(hand)
-                EXERCISE_THUMB_ID -> if (GestureAnalyzer.isThumbTouching(hand)) HandGesture.OPEN_PALM else HandGesture.FIST
-                else -> GestureAnalyzer.analyze(hand)
+                EXERCISE_FAN_ID -> GestureAnalyzer.analyzeFan(
+                    hand,
+                    lastAnalyzedGesture,
+                    thresholds.fanOpenRatio,
+                    thresholds.fanCloseRatio,
+                    thresholds.extensionRatio,
+                )
+                EXERCISE_CLAW_ID -> GestureAnalyzer.analyzeClaw(
+                    hand,
+                    thresholds.clawFistRatio,
+                    thresholds.clawStraightRatio,
+                )
+                EXERCISE_THUMB_ID -> if (GestureAnalyzer.isThumbTouching(hand, thresholds.thumbTouchDistance)) {
+                    HandGesture.OPEN_PALM
+                } else {
+                    HandGesture.FIST
+                }
+                else -> GestureAnalyzer.analyze(hand, thresholds.extensionRatio)
             }
 
             statusMessage = when (gesture) {
@@ -653,7 +681,7 @@ class SessionActivity : AppCompatActivity() {
                 pendingGesture = gesture
                 pendingSinceMs = now
             }
-            val confirmedGesture = if (now - pendingSinceMs >= GESTURE_STABLE_MS) gesture else stableGesture
+            val confirmedGesture = if (now - pendingSinceMs >= thresholds.gestureStableMs) gesture else stableGesture
             if (confirmedGesture != stableGesture) stableGesture = confirmedGesture
             lastAnalyzedGesture = gesture
 
